@@ -66,35 +66,3 @@ fn main() {
     }
 }
 
-#[derive(Debug, PartialEq)]
-enum AliasAction {
-    ShowAll,
-    Query(String),
-    Set { name: String, value: String },
-    Invalid,
-}
-
-fn parse_alias_args(args: &[String]) -> AliasAction {
-    match args.len() {
-        1 => AliasAction::ShowAll,
-        2 => AliasAction::Query(args[1].clone()),
-        n if n >= 3 => {
-            // Join args into one string to handle both 'x y' and 'x=y'
-            let input = args[1..].join(" ");
-            let parts: Vec<&str> = input.splitn(2, |c| c == '=' || c == ' ').collect();
-
-            if parts.len() == 2 {
-                let name = parts[0].trim().to_string();
-                let value = parts[1].trim().to_string();
-                if name.is_empty() {
-                    AliasAction::Invalid
-                } else {
-                    AliasAction::Set { name, value }
-                }
-            } else {
-                AliasAction::Invalid
-            }
-        }
-        _ => AliasAction::Invalid,
-    }
-}
