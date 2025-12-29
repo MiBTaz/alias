@@ -3,4 +3,11 @@ name = "alias"
 version = "0.1.0"
 edition = "2024"
 
+[profile.release]
+opt-level = 3              # Maximize speed (Level 3 is the highest)
+lto = true                 # Link Time Optimization (optimizes across crate boundaries)
+codegen-units = 1          # Allows for more aggressive optimizations
+panic = "abort"            # Removes stack unwinding code (smaller/faster)
+strip = true               # Automatically strips symbols (no need for external tools)
+
 [dependencies]
