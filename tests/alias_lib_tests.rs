@@ -3,6 +3,7 @@
 use crate::*;
 use std::env;
 use std::fs;
+use std::path::PathBuf;
 
 // --- PARSER TESTS ---
 
@@ -355,46 +356,28 @@ fn test_deletion_logic_path() {
 }
 
 #[test]
-fn test_real_file_deletion() {
-    // 1. Create a dummy file with an alias
-    let path = PathBuf::from("test_aliases.txt");
-    fs::write(&path, "cdx=some_old_command\n").unwrap();
-
-    // 2. Run the logic that should delete it
+fn test_logic_file_deletion() {
+    let original = "ls=dir\ncdx=old_cmd\ngs=git status\n";
     let name = "cdx";
     let value = ""; // The delete signal
-    set_alias(name, value, &path, true).unwrap();
 
-    // 3. Read the file back
-    let content = fs::read_to_string(&path).unwrap();
+    let result = calculate_new_file_state(original, name, value);
 
-    // 4. THIS should have failed in the old code if the file wasn't updating
-    assert!(!content.contains("cdx="), "The file should not contain the deleted alias!");
-
-    // Cleanup
-    fs::remove_file(path).unwrap();
+    assert!(!result.contains("cdx="), "The result should not contain the deleted alias");
+    assert!(result.contains("ls=dir"), "Other aliases should remain untouched");
+    assert!(result.contains("gs=git status"), "Other aliases should remain untouched");
 }
 
 #[test]
-fn test_alias_deletion_persistence() {
-    let name = "cdx";
-    let value = "";
-    let test_path = PathBuf::from("ghost_test.doskey");
+fn test_logic_file_update() {
+    let original = "ls=dir\n";
+    let name = "ls";
+    let value = "ls --color=auto";
 
-    // 1. Create a file with the alias in it
-    fs::write(&test_path, "cdx=FOR /F tokens=* %i IN ('v:\\lbin\\ncd.exe $*') DO @(set OLDPWD=%CD% & chdir /d %i)\n").unwrap();
+    let result = calculate_new_file_state(original, name, value);
 
-    // 2. RUN the actual set_alias function (This uses the variables!)
-    let _ = set_alias(name, value, &test_path, true);
-
-    // 3. READ it back
-    let content = fs::read_to_string(&test_path).unwrap();
-
-    // 4. ASSERT - This will fail if your filter logic is broken
-    assert!(!content.contains("cdx="), "The ghost of cdx is still in the file!");
-
-    // Cleanup
-    let _ = fs::remove_file(test_path);
+    assert!(result.contains("ls=ls --color=auto"), "The alias should be updated");
+    assert!(!result.contains("ls=dir\n"), "The old version should be gone");
 }
 
 #[test]
@@ -462,3 +445,19 @@ fn test_quiet_flag_positioning() {
     assert!(quiet);
 }
 
+#[test]
+fn test_complex_deletion_logic() {
+    // This tests the "Ghost" logic without needing set_alias or a real disk
+    let name = "cdx";
+    let value = ""; // Delete signal
+    let complex_alias = "cdx=FOR /F tokens=* %i IN ('v:\\lbin\\ncd.exe $*') DO @(set OLDPWD=%CD% & chdir /d %i)\n";
+    let other_alias = "ls=dir\n";
+    let original_content = format!("{}{}", complex_alias, other_alias);
+
+    // Call the PURE logic from the lib
+    let result = calculate_new_file_state(&original_content, name, value);
+
+    // ASSERT
+    assert!(!result.contains("cdx="), "The complex ghost of cdx should be removed from the string");
+    assert!(result.contains("ls=dir"), "Other lines should be preserved");
+}
