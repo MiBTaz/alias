@@ -1,8 +1,6 @@
 // alias_win32/tests/win32lib.rs
 
-#[allow(unused_imports)]
 use alias_lib::*;
-#[allow(unused_imports)]
 use alias_wrapper::*;
 
 // Instead of 'mod wrapper_specialist', just include the path directly

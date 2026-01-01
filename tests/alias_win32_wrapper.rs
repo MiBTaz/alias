@@ -5,8 +5,17 @@ use std::path::PathBuf;
 use crate::*;
 use serial_test::serial;
 
+extern crate alias_nuke;
+
 pub fn get_test_path(suffix: &str) -> PathBuf {
     PathBuf::from(format!("test_{}_{:?}.doskey", suffix, std::thread::current().id()))
+}
+
+#[test]
+#[serial]
+fn a_nuke_the_world() {
+    // This runs first (alphabetically) and calls your new lib
+    alias_nuke::kernel_wipe_macros();
 }
 
 #[test]
@@ -238,4 +247,11 @@ fn test_routine_set_persistence() {
 
     assert!(success, "RAM Strike did not settle in the isolated bucket.");
     let _ = std::fs::remove_file(path);
+}
+
+#[test]
+#[serial]
+fn z_nuke_the_world_end() {
+    // This runs first (alphabetically) and calls your new lib
+    alias_nuke::kernel_wipe_macros();
 }

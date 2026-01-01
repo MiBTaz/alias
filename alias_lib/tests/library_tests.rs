@@ -1,6 +1,5 @@
-// alias_lib/tests/tests.rs
+// alias_lib/tests/library_tests.rs
 // 1. Pull in the public API of the library
-#[allow(unused_imports)]
 use alias_lib::*;
 
 /// ---------------------------------------------------------

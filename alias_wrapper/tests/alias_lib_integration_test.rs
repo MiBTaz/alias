@@ -1,9 +1,6 @@
 // alias_wrapper/tests/tests.rs
 // 1. Pull in the public API of the library
-#[allow(unused_imports)]
 use alias_lib::*;
-#[allow(unused_imports)]
-use alias_wrapper::*;
 
 /// ---------------------------------------------------------
 /// 1. LOCAL TESTS (Specific to this crate)
@@ -29,16 +26,12 @@ mod shared_lib;
 #[cfg(test)]
 mod wrapper_specialist {
     // 1. Bring the muscle into this room
-    #[allow(unused_imports)]
-    use alias_lib::*;
-    #[allow(unused_imports)]
-    use alias_wrapper::*;
+//    use alias_lib::*;
 
     // 2. Point to the shared test file
     #[path = "../../tests/alias_win32_wrapper.rs"]
     mod shared_muscle {
         // 3. THIS IS THE KEY: Reach up and grab 'set_alias' from the parent room
-        #[allow(unused_imports)]
-        use super::*;
+ //       use super::*;
     }
 }

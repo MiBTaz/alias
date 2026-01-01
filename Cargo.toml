@@ -7,9 +7,11 @@ strip = true               # Automatically strips symbols (no need for external 
 
 [workspace]
 members = [
+    "alias_nuke",
     "alias_lib",
     "alias_wrapper",
     "alias_win32",
     "alias_hybrid",
 ]
+
 resolver = "3"

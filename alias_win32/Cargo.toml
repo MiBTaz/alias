@@ -8,9 +8,11 @@ alias_lib = { path = "../alias_lib" }
 windows-sys = { version = "0.61.2", features = [
     "Win32_System_Console",
     "Win32_System_Registry",
-    "Win32_Foundation"
+    "Win32_Foundation",
+    "Win32_Foundation",
 ] }
 winreg = "0.55.0"
 
 [dev-dependencies]
 serial_test = "3.1.1"
+alias_nuke = { path = "../alias_nuke" }

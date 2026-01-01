@@ -3,3 +3,6 @@ name = "alias_lib"
 version = "0.3.0"
 edition = "2024"
 
+[dev-dependencies]
+# This ensures alias_nuke is built before any lib tests run
+alias_nuke = { path = "../alias_nuke" }

@@ -12,6 +12,8 @@
       <sourceFolder url="file://$MODULE_DIR$/alias_lib/tests" isTestSource="true" />
       <sourceFolder url="file://$MODULE_DIR$/alias_win32/tests" isTestSource="true" />
       <sourceFolder url="file://$MODULE_DIR$/alias_wrapper/tests" isTestSource="true" />
+      <sourceFolder url="file://$MODULE_DIR$/alias_nuke/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/alias_nuke/tests" isTestSource="true" />
       <excludeFolder url="file://$MODULE_DIR$/target" />
     </content>
     <orderEntry type="inheritedJdk" />

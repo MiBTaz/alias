@@ -1,11 +1,6 @@
 // alias_win32/tests/win32lib.rs
 
-use std::fs;
-use std::path::PathBuf;
-use serial_test::serial;
-#[allow(unused_imports)]
 use alias_lib::*;
-#[allow(unused_imports)]
 use alias_win32::*;
 
 // Instead of 'mod wrapper_specialist', just include the path directly

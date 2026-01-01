@@ -1,37 +1,50 @@
 // alias_win32/src/lib.rs
 
-// --- Win32 API Core ---
-
 use std::{env, fs, io};
 use std::path::Path;
 use windows_sys::Win32::Foundation::GetLastError;
-use windows_sys::Win32::System::Console::{AddConsoleAliasA, GetConsoleAliasA, GetConsoleAliasesA, GetConsoleAliasesLengthA};
-use windows_sys::Win32::System::Registry::{RegCloseKey, RegCreateKeyA, RegSetValueExA, HKEY, REG_SZ, HKEY_CURRENT_USER};
+use windows_sys::Win32::System::Console::{GetConsoleAliasesLengthA, GetConsoleAliasesA};
 use alias_lib::*;
 use alias_lib::qprintln;
 use std::io::Read;
-// For the Win32 version, we'll use winreg for a clean API-level check
+use std::os::windows::ffi::OsStrExt;
 use winreg::RegKey;
+use winreg::enums::HKEY_CURRENT_USER;
 
-fn get_target_exe() -> *const u8 {
+// Simplified Wide Silo for Serial Testing
+fn get_target_exe_wide() -> *const u16 {
     use std::sync::OnceLock;
+    static BUCKET_W: OnceLock<Vec<u16>> = OnceLock::new();
 
-    struct PtrWrapper(*const u8);
-    unsafe impl Sync for PtrWrapper {}
-    unsafe impl Send for PtrWrapper {}
-
-    static BUCKET_PTR: OnceLock<PtrWrapper> = OnceLock::new();
-
-    BUCKET_PTR.get_or_init(|| {
-        // If the ALIAS_TEST_BUCKET env var exists, we ARE in a test. Period.
+    BUCKET_W.get_or_init(|| {
         let is_test = std::env::var("ALIAS_TEST_BUCKET").is_ok() || cfg!(test);
+        let name = if is_test { "alias_test_silo" } else { "cmd.exe" };
+        std::ffi::OsStr::new(name)
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect()
+    }).as_ptr()
+}
 
-        if is_test {
-            PtrWrapper(b"alias_test_silo\0".as_ptr())
-        } else {
-            PtrWrapper(b"cmd.exe\0".as_ptr())
+// Keep the old one only if other ANSI functions still need it,
+// otherwise you can delete it later.
+fn get_target_exe() -> *const u8 {
+    use std::cell::RefCell;
+    thread_local! {
+        static THREAD_BUCKET: RefCell<Vec<u8>> = RefCell::new(Vec::new());
+    }
+    THREAD_BUCKET.with(|bucket| {
+        let mut b = bucket.borrow_mut();
+        if b.is_empty() {
+            let name = if std::env::var("ALIAS_TEST_BUCKET").is_ok() || cfg!(test) {
+                format!("alias_test_silo_{:?}\0", std::thread::current().id())
+            } else {
+                "cmd.exe\0".to_string()
+            };
+            *b = name.into_bytes();
         }
-    }).0
+        b.as_ptr()
+    })
 }
 
 pub struct Win32LibraryInterface;
@@ -62,12 +75,19 @@ impl alias_lib::AliasProvider for Win32LibraryInterface {
 }
 
 pub fn api_set_macro(name: &str, value: Option<&str>) -> bool {
-    let (n_c, v_c) = (format!("{}\0", name), value.map(|v| format!("{}\0", v)));
+    use std::os::windows::ffi::OsStrExt;
+
+    // Encode strings to Wide (UTF-16) for Win32 W-APIs
+    let n_wide: Vec<u16> = std::ffi::OsStr::new(name).encode_wide().chain(Some(0)).collect();
+    let v_wide: Option<Vec<u16>> = value.map(|v| {
+        std::ffi::OsStr::new(v).encode_wide().chain(Some(0)).collect()
+    });
+
     unsafe {
-        AddConsoleAliasA(
-            n_c.as_ptr(),
-            v_c.as_ref().map_or(std::ptr::null(), |v| v.as_ptr()),
-            get_target_exe() // Use dynamic target
+        windows_sys::Win32::System::Console::AddConsoleAliasW(
+            n_wide.as_ptr(),
+            v_wide.as_ref().map_or(std::ptr::null(), |v| v.as_ptr()),
+            get_target_exe_wide() // You'll need a similar Wide version of the silo name
         ) != 0
     }
 }
@@ -112,39 +132,29 @@ pub fn set_alias(opts: SetOptions, path: &Path, quiet: bool) -> io::Result<()> {
 
 // --- Logic Helpers ---
 pub fn install_autorun(quiet: bool) -> io::Result<()> {
-    // 1. Get path and wrap in quotes to handle spaces
     let exe_path = env::current_exe()?;
-    let cmd_string = format!("\"{}\" --reload", exe_path.display());
+    let our_cmd = format!("\"{}\" --reload", exe_path.display());
 
-    // 2. Prepare null-terminated C-strings (ANSI for simplicity, if you prefer)
-    let c_subkey = "Software\\Microsoft\\Command Processor\0";
-    let c_value_name = "AutoRun\0";
-    let mut c_data = cmd_string.into_bytes();
-    c_data.push(0); // Explicit null terminator for the Registry
+    let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+    let (key, _) = hkcu.create_subkey(REG_SUBKEY)?;
 
-    let mut hkey: HKEY = 0 as HKEY;
-    unsafe {
-        // Use RegCreateKeyExA for better compatibility/control
-        if RegCreateKeyA(HKEY_CURRENT_USER, c_subkey.as_ptr(), &mut hkey) == 0 {
+    // 1. Check if an AutoRun already exists
+    let existing: String = key.get_value(REG_AUTORUN_KEY).unwrap_or_default();
 
-            let status = RegSetValueExA(
-                hkey,
-                c_value_name.as_ptr(),
-                0,
-                REG_SZ, // Use REG_SZ unless you are using %VAR% variables
-                c_data.as_ptr(),
-                c_data.len() as u32
-            );
+    // 2. Decide if we need to append or just set
+    let new_val = if existing.is_empty() {
+        our_cmd
+    } else if existing.contains("--reload") {
+        qprintln!(quiet, "ℹ️ AutoRun already configured.");
+        return Ok(());
+    } else {
+        // Append with '&' to preserve existing AutoRun logic (e.g., Clink/Anaconda)
+        format!("{} & {}", existing, our_cmd)
+    };
 
-            RegCloseKey(hkey);
-
-            if status == 0 {
-                qprintln!(quiet, "✅ AutoRun hook installed.");
-                return Ok(());
-            }
-        }
-    }
-    Err(io::Error::new(io::ErrorKind::Other, "Registry access denied or failed"))
+    key.set_value(REG_AUTORUN_KEY, &new_val)?;
+    qprintln!(quiet, "✅ AutoRun hook installed (Preserved existing commands).");
+    Ok(())
 }
 
 // --- Win32 Memory Iteration ---
@@ -190,24 +200,24 @@ pub fn alias_show_all() {
 }
 
 pub fn get_all_aliases_raw() -> Vec<String> {
-    let exe_name = get_target_exe();
-
-    // 1. Get length
-    let len = unsafe { GetConsoleAliasesLengthA(exe_name as *mut u8) };
-    if len == 0 { return vec![]; }
-
-    // 2. Fetch
-    let mut buffer = vec![0u8; len as usize];
+    let exe_name = get_target_exe_wide(); // Use Wide Silo
     unsafe {
-        GetConsoleAliasesA(buffer.as_mut_ptr(), len, exe_name as *mut u8);
-    }
+        let len = windows_sys::Win32::System::Console::GetConsoleAliasesLengthW(exe_name);
+        if len == 0 { return vec![]; }
 
-    // 3. The Parse (Keeping the "None"/Empty slots if needed)
-    buffer.split(|&b| b == 0)
-        .map(|chunk| String::from_utf8_lossy(chunk).to_string())
-        // We only filter the very last entry if the buffer ended in a null
-        .filter(|s| !s.is_empty())
-        .collect()
+        let mut buffer = vec![0u16; len as usize / 2]; // u16 for Wide
+        let read = windows_sys::Win32::System::Console::GetConsoleAliasesW(
+            buffer.as_mut_ptr(),
+            len,
+            exe_name
+        );
+
+        String::from_utf16_lossy(&buffer[..read as usize / 2])
+            .split('\0')
+            .filter(|s| !s.trim().is_empty())
+            .map(|s| s.to_string())
+            .collect()
+    }
 }
 
 pub fn get_all_aliases() -> Vec<(String, String)> {
@@ -227,7 +237,7 @@ pub fn check_autorun_status() -> io::Result<String> {
     let mut hkey = 0 as windows_sys::Win32::System::Registry::HKEY;
     unsafe {
         let subkey = format!("{}\0", REG_SUBKEY);
-        let val_name = format!("{}\0", REG_VALUE_NAME);
+        let val_name = format!("{}\0", REG_AUTORUN_KEY);
         if RegOpenKeyA(HKEY_CURRENT_USER, subkey.as_ptr(), &mut hkey) == 0 {
             let mut buf = [0u8; 512];
             let mut len = buf.len() as u32;
@@ -243,27 +253,28 @@ pub fn check_autorun_status() -> io::Result<String> {
 }
 
 pub fn query_alias(name: &str, mode: OutputMode) -> Vec<String> {
-    let mut results = Vec::new();
-    let target = get_target_exe(); // Use dynamic target
-    let name_c = format!("{}\0", name);
-    let mut buffer = [0u8; 2048];
+    use std::os::windows::ffi::OsStrExt;
+    let name_w: Vec<u16> = std::ffi::OsStr::new(name).encode_wide().chain(Some(0)).collect();
+    let target_w = get_target_exe_wide();
+    let mut buffer = [0u16; 2048];
 
     unsafe {
-        let result = GetConsoleAliasA(
-            name_c.as_ptr() as *mut u8,
+        let result = windows_sys::Win32::System::Console::GetConsoleAliasW(
+            name_w.as_ptr() as *mut u16,
             buffer.as_mut_ptr(),
-            buffer.len() as u32,
-            target as *mut u8,
+            buffer.len() as u32 * 2,
+            target_w as *mut u16,
         );
         if result > 0 {
-            // Use result length strictly to avoid reading junk/nulls
-            let output = String::from_utf8_lossy(&buffer[..result as usize]).to_string();
-            results.push(output);
-        } else if mode == OutputMode::Normal {
-            results.push(format!("⚠️ '{}' not active (Err: {})", name, GetLastError()));
+            vec![String::from_utf16_lossy(&buffer[..result as usize / 2])]
+        } else {
+            if mode == OutputMode::Normal {
+                vec![format!("⚠️ '{}' not active", name)]
+            } else {
+                vec![]
+            }
         }
     }
-    results
 }
 
 pub fn get_alias_list() -> Vec<String> {
@@ -322,11 +333,11 @@ pub fn run_diagnostics(path: &Path) {
     // Instead of shelling out to reg.exe, we use the Windows Registry API
     println!("\nRegistry Check (AutoRun):");
     let hkcu = RegKey::predef(HKEY_CURRENT_USER);
-    let subkey = r"Software\Microsoft\Command Processor";
+    let subkey = REG_SUBKEY;
 
     match hkcu.open_subkey(subkey) {
         Ok(key) => {
-            let autorun: String = key.get_value("AutoRun").unwrap_or_default();
+            let autorun: String = key.get_value(REG_AUTORUN_KEY).unwrap_or_default();
             if autorun.is_empty() {
                 println!("  Status:      EMPTY (No AutoRun set) ⚪");
             } else if autorun.contains("alias") {

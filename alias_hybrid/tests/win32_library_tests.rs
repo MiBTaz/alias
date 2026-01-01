@@ -1,6 +1,5 @@
-// alias_hybrid/tests/win32lib.rs
+// alias_hybrid/tests/win32_library_tests.rs
 
-#[allow(unused_imports)]
 use alias_lib::*;
 #[allow(unused_imports)]
 use alias_win32::*;
@@ -9,7 +8,5 @@ use alias_win32::*;
 // so the tests are registered to this file's root.
 #[cfg(test)]
 #[path = "../../tests/alias_win32_wrapper.rs"]
-mod shared_muscle_win32;
+mod win32_api;
 
-// If alias_win32_wrapper.rs needs access to the imports above,
-// make sure that file has 'use crate::*;' or 'use alias_win32::*;' at the top.

@@ -1,6 +1,6 @@
 [package]
 name = "alias"
-version = "6.0.1"
+version = "0.6.1"
 edition = "2024"
 
 [dependencies]
@@ -10,5 +10,13 @@ alias_wrapper = { path = "../alias_wrapper" }
 windows-sys = { version = "0.61.2", features = [
     "Win32_System_Console",
     "Win32_System_Registry",
-    "Win32_Foundation"
+    "Win32_Foundation",
+    "Win32_Foundation",
 ] }
+assert_cmd = "2.1.1"
+predicates = "3.1.3"
+
+[dev-dependencies]
+serial_test = "3.1.1"
+alias_nuke = { path = "../alias_nuke" }
+

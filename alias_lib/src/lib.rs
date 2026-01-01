@@ -21,8 +21,14 @@ pub const ENV_EDITOR: &str = "EDITOR";
 pub const ENV_VISUAL: &str = "VISUAL";
 pub const DEFAULT_ALIAS_FILENAME: &str = "aliases.doskey";
 pub const FALLBACK_EDITOR: &str = "notepad";
+pub const REG_CURRENT_USER: &str = "HKCU";
+pub const PATH_SEPARATOR: &str = "\\";
 pub const REG_SUBKEY: &str = "Software\\Microsoft\\Command Processor";
-pub const REG_VALUE_NAME: &str = "AutoRun";
+pub const REG_SUBKEY_NULL: &str = "Software\\Microsoft\\Command Processor\0";
+pub const REG_AUTORUN_KEY: &str = "AutoRun";
+pub const REG_AUTORUN_KEY_NULL: &str = "AutoRun\0";
+
+
 
 // --- Enums ---
 #[derive(Debug, Clone, Copy)]
@@ -208,7 +214,17 @@ pub struct SetOptions {
     pub force_case: bool, // If true, skip .to_lowercase() (The "Injection" override)
 }
 
-// alias_lib/src/lib.rs
+impl SetOptions {
+    pub fn new(name: &str, value: &str) -> Self {
+        Self {
+            name: name.to_string(),
+            value: value.to_string(),
+            volatile: false,
+            force_case: false,
+        }
+    }
+}
+
 
 pub struct PurgeReport {
     pub cleared: Vec<String>,
@@ -236,9 +252,18 @@ pub fn resolve_command(cmd: &str) -> Option<AliasAction> {
 
 /// The final word: No spaces anywhere, must be alphanumeric start.
 pub fn is_valid_name(name: &str) -> bool {
-    // If it contains a space anywhere (leading, trailing, or middle), it's out.
+    if name.is_empty() { return false; }
+
+    // 1. Reject if it contains any internal spaces
     if name.contains(' ') { return false; }
-    is_valid_name_loose(name)
+
+    // 2. Reject if there are leading/trailing spaces (must be exact)
+    if name.trim() != name { return false; }
+
+    let first = name.chars().next().unwrap();
+
+    // 3. Enforce: Must start with Letter or Underscore (Blocks 0-9 and Symbols)
+    first.is_alphabetic() || first == '_'
 }
 
 // The initial guard: Must be alphanumeric start.
@@ -349,33 +374,43 @@ pub fn is_path_healthy(p: &Path) -> bool {
 pub fn parse_macro_file(path: &Path) -> Vec<(String, String)> {
     fs::read_to_string(path).unwrap_or_default()
         .lines()
-        // 1. Clean the whitespace
         .map(|l| l.trim())
-        // 2. Ignore empty lines
         .filter(|l| !l.is_empty())
-        // 3. Try to split
         .filter_map(|l| l.split_once('='))
-        // 4. Validate the name (Kills #, //, ::, /*, and spaces)
-        .filter(|(k, _)| is_valid_name(k.trim()))
+        .filter(|(k, v)| is_valid_name(k.trim()) && !v.trim().is_empty())
         .map(|(k, v)| (k.trim().to_string(), v.trim().to_string()))
         .collect()
 }
 
 pub fn update_disk_file(name: &str, value: &str, path: &Path) -> io::Result<()> {
-    if !is_valid_name(name) {
-        return Err(io::Error::new(io::ErrorKind::InvalidInput, "Refusing to write illegal alias name to disk."));
+    let mut pairs = if path.exists() {
+        parse_macro_file(path)
+    } else {
+        Vec::new()
+    };
+
+    // Update or Remove
+    if let Some(pos) = pairs.iter().position(|(n, _)| n == name) {
+        if value.is_empty() { pairs.remove(pos); }
+        else { pairs[pos].1 = value.to_string(); }
+    } else if !value.is_empty() {
+        pairs.push((name.to_string(), value.to_string()));
     }
-    let content = fs::read_to_string(path).unwrap_or_default();
-    let search = format!("{}=", name.trim().to_lowercase());
 
-    let mut lines: Vec<String> = content.lines()
-        .filter(|l| !l.to_lowercase().starts_with(&search))
-        .map(String::from).collect();
+    // --- TRANSACTIONAL WRITE ---
+    let tmp_path = path.with_extension("doskey.tmp");
+    {
+        let mut content = String::new();
+        for (n, v) in pairs {
+            content.push_str(&format!("{}={}\n", n, v));
+        }
+        fs::write(&tmp_path, content)?;
+    }
 
-    if !value.is_empty() { lines.push(format!("{}={}", name.trim(), value)); }
+    // Atomic Rename: If this fails, the original file is untouched
+    fs::rename(&tmp_path, path)?;
 
-    let output = lines.join("\n") + if lines.is_empty() { "" } else { "\n" };
-    fs::write(path, output)
+    Ok(())
 }
 
 // --- OS Interop ---

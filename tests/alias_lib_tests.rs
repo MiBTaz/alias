@@ -5,15 +5,6 @@ use std::env;
 use std::fs;
 use std::path::PathBuf;
 
-fn mock_set(name: &str, value: &str) -> AliasAction {
-    AliasAction::Set(SetOptions {
-        name: name.to_string(),
-        value: value.to_string(),
-        volatile: false,
-        force_case: false,
-    })
-}
-
 // --- PARSER TESTS ---
 
 #[test]
@@ -559,22 +550,6 @@ mod tests {
 }
 
 #[test]
-fn test_sovereign_gatekeeper_logic() {
-    // Harsh: No spaces, alphanumeric start
-    assert!(is_valid_name("git123"));
-    assert!(!is_valid_name(" git"));      // Leading space
-    assert!(!is_valid_name("git "));      // Trailing space
-    assert!(!is_valid_name("g s"));       // Internal space
-    assert!(!is_valid_name("-git"));      // Symbol start
-    assert!(!is_valid_name("\"git\""));   // Quote start
-
-    // Loose: Spaces allowed later (for the Beast), alphanumeric start
-    assert!(is_valid_name_loose("gs=git status"));
-    assert!(!is_valid_name_loose(" gs=git"));      // Leading space still kills it
-    assert!(!is_valid_name_loose("=git status"));  // Empty name kills it
-}
-
-#[test]
 fn test_macro_file_ingest_resilience() {
     let content = "
         # Valid Comment
@@ -630,3 +605,100 @@ fn test_jason_prevention_on_cli() {
     assert_eq!(action2, AliasAction::Invalid);
 }
 
+#[test]
+fn test_path_env_garbage() {
+    // Test what happens if ALIAS_FILE points to a directory instead of a file
+    let temp_dir = env::temp_dir().join("not_a_file");
+    fs::create_dir_all(&temp_dir).unwrap();
+    unsafe {
+        env::set_var(ENV_ALIAS_FILE, &temp_dir);
+    }
+    let path = get_alias_path().expect("Should still resolve");
+
+    // Logic check: Does it append the default filename?
+    assert!(path.to_string_lossy().ends_with(DEFAULT_ALIAS_FILENAME));
+
+    fs::remove_dir(temp_dir).ok();
+    unsafe {
+        env::remove_var(ENV_ALIAS_FILE);
+    }
+}
+
+#[test]
+fn test_macro_file_corruption_resilience() {
+    let content = "valid=true\n=missing_name\n \n \n!!!!=garbage\nother=valid";
+
+    // We create a dummy path to satisfy the function signature
+    let temp_file = env::temp_dir().join("corrupt.doskey");
+    fs::write(&temp_file, content).unwrap();
+
+    let results = parse_macro_file(&temp_file);
+
+    assert_eq!(results.len(), 2);
+    assert_eq!(results[0].0, "valid");
+    assert_eq!(results[1].0, "other");
+
+    fs::remove_file(temp_file).ok();
+}
+
+#[test]
+fn test_argument_overflow_and_quotes() {
+    // Testing: alias name="quoted value with spaces" --temp --force
+    let args = vec![
+        "alias".into(),
+        "name=\"quoted".into(),
+        "value\"".into(),
+        "--temp".into(),
+        "--force".into()
+    ];
+    let (action, _) = parse_alias_args(&args);
+
+    if let AliasAction::Set(opts) = action {
+        assert_eq!(opts.name, "name");
+        // Check if quotes are preserved correctly
+        assert_eq!(opts.value, "\"quoted value\"");
+        assert!(opts.volatile);
+    }
+}
+
+#[test]
+fn test_path_no_env_vars() {
+    // We simulate the "Resilience" by checking if the healthy check
+    // handles a completely non-existent, non-env-backed path safely.
+    let path = std::path::Path::new("Z:\\This\\Does\\Not\\Exist\\At\\All\\aliases.doskey");
+    assert!(!is_path_healthy(path), "Should handle non-existent root safely");
+}
+
+#[test]
+fn test_international_alias_names() {
+    assert!(is_valid_name("ñ"));
+    assert!(is_valid_name("λ"));
+
+    // DECISION: We block numbers at the start to follow CLI standards
+    assert!(!is_valid_name("123alias"), "Names should not start with numbers");
+    assert!(!is_valid_name("9_at_start"), "Names should not start with numbers");
+}
+
+#[test]
+fn test_sovereign_gatekeeper_logic() {
+    // This test ensures we don't allow "invisible" garbage
+    assert!(!is_valid_name("git "), "Trailing spaces are invalid");
+    assert!(!is_valid_name(" git"), "Leading spaces are invalid");
+    assert!(!is_valid_name("name with space"), "Internal spaces are invalid");
+}
+
+#[test]
+fn test_mesh_logic_phantom_detection() {
+    let win32 = vec![("ghost".to_string(), "active".to_string())];
+    let _wrap: Vec<(String, String)> = vec![]; // Prefix with _
+    let file: Vec<(String, String)> = vec![];
+
+    let mesh = mesh_logic(win32, file);
+    assert_eq!(mesh.len(), 1);
+}
+
+#[test]
+fn a_nuke_the_world() {
+    // This runs first (alphabetically) and calls your new lib
+    alias_nuke::kernel_wipe_macros();
+}

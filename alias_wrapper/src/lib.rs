@@ -43,27 +43,25 @@ pub fn reload_doskey(path: &Path) -> io::Result<()> {
         .map(|_| ())
 }
 
+// In alias_wrapper/src/lib.rs
 pub fn set_alias(opts: SetOptions, path: &Path, quiet: bool) -> io::Result<()> {
-    // 1. Respect the flags from the struct
-    let name = if opts.force_case { opts.name } else { opts.name.to_lowercase() };
+    let name = if opts.force_case { opts.name.clone() } else { opts.name.to_lowercase() };
 
-    // 2. The Disk Strike (Skip if --temp)
     if !opts.volatile {
-        // Use your existing logic to update the .doskey file
-        update_disk_file(&name, &opts.value, path)?;
+        // Use the transactional disk fix from Win32 work
+        alias_lib::update_disk_file(&name, &opts.value, path)?;
     }
 
-    // 3. The RAM Strike (Fallback to Doskey.exe)
-    // We pass the name and value to doskey so it's active immediately
+    // By passing name=value as a single argument to Command::arg,
+    // Rust handles the necessary quoting for the Win32 process spawn.
     let status = std::process::Command::new("doskey")
-        .arg(format!("{}={}", name, opts.value))
+        .args(["/exename=cmd.exe", &format!("{}={}", name, opts.value)])
         .status()?;
 
     if status.success() {
         let tag = if opts.volatile { "(volatile)" } else { "(saved)" };
         qprintln!(quiet, "✨ Wrapper set {}: {}={}", tag, name, opts.value);
     }
-
     Ok(())
 }
 
@@ -94,60 +92,54 @@ pub fn reload_full(path: &Path, quiet: bool) -> io::Result<()> {
 /// Hooks the tool into the CMD AutoRun registry key
 pub fn install_autorun(quiet: bool) -> io::Result<()> {
     let exe_path = env::current_exe()?;
+    let our_cmd = format!("\"{}\" --reload", exe_path.display());
 
-    // We use --reload so every new shell is fresh
-    let command = format!("\"{}\" --reload", exe_path.display());
+    let hkcu = winreg::RegKey::predef(winreg::enums::HKEY_CURRENT_USER);
+    // Use the constants provided in the wrapper logic
+    let (key, _) = hkcu.create_subkey(REG_SUBKEY)?;
 
-    qprintln!(quiet, "🔗 Target: {}", command);
+    // 1. Check if an AutoRun already exists
+    let existing: String = key.get_value("AutoRun").unwrap_or_default();
 
-    let status = Command::new("reg")
-        .args([
-            "add",
-            "HKCU\\Software\\Microsoft\\Command Processor",
-            "/v", "AutoRun",
-            "/t", "REG_EXPAND_SZ",
-            "/d", &command,
-            "/f"
-        ])
-        .status()?;
+    // 2. Decide if we need to append or just set
+    let new_val = if existing.is_empty() {
+        our_cmd
+    } else if existing.contains("--reload") {
+        qprintln!(quiet, "ℹ️ Wrapper: AutoRun already configured.");
+        return Ok(());
+    } else {
+        // Append with '&' to preserve existing commands
+        format!("{} & {}", existing, our_cmd)
+    };
 
-    if !status.success() {
-        return Err(io::Error::new(
-            io::ErrorKind::Other,
-            "Registry update failed. Check permissions."
-        ));
-    }
-
+    key.set_value("AutoRun", &new_val)?;
+    qprintln!(quiet, "✅ Wrapper: AutoRun hook installed (Preserved existing commands).");
     Ok(())
 }
 
 pub fn query_alias(name: &str, mode: OutputMode) -> Vec<String> {
     let mut results = Vec::new();
-    let search = format!("{}=", name.to_lowercase());
+    let search_target = name.to_lowercase();
 
-    // 1. System Strike (No API - strictly spawning doskey)
     let output = std::process::Command::new("doskey")
         .args(["/macros:cmd.exe"])
         .output();
 
-    match output {
-        Ok(out) if out.status.success() => {
-            let stdout = String::from_utf8_lossy(&out.stdout);
-            let found = stdout
-                .lines()
-                .find(|line| line.to_lowercase().starts_with(&search));
+    if let Ok(out) = output {
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        for line in stdout.lines() {
+            // Split only on the first '=' to handle "Beasts" in the value
+            if let Some((k, v)) = line.split_once('=') {
+                if k.trim_matches('"').to_lowercase() == search_target {
+                    results.push(format!("{}={}", k, v));
+                    return results;
+                }
+            }
+        }
+    }
 
-            if let Some(line) = found {
-                results.push(line.to_string());
-            } else if mode == OutputMode::Normal {
-                results.push(format!("⚠️ '{}' not found via doskey query.", name));
-            }
-        }
-        _ => {
-            if mode == OutputMode::Normal {
-                results.push("❌ Error: Wrapper failed to execute doskey.exe".to_string());
-            }
-        }
+    if mode == OutputMode::Normal {
+        results.push(format!("⚠️ '{}' not found via doskey query.", name));
     }
     results
 }
@@ -178,7 +170,7 @@ pub fn run_diagnostics(path: &Path) {
     }
 
     println!("\nRegistry Check (AutoRun):");
-    let reg = Command::new("reg").args(["query", "HKCU\\Software\\Microsoft\\Command Processor", "/v", "AutoRun"]).output();
+    let reg = Command::new("reg").args(["query", &(vec![REG_CURRENT_USER, REG_SUBKEY].join(PATH_SEPARATOR)), "/v", "AutoRun"]).output();
     if let Ok(out) = reg {
         let s = String::from_utf8_lossy(&out.stdout);
         // Checking if the current resolved path is actually in the AutoRun string
@@ -209,7 +201,7 @@ pub fn get_autorun_command(alias_path: &Path) -> String {
 
 pub fn get_all_aliases() -> Vec<(String, String)> {
     let output = std::process::Command::new("doskey")
-        .arg("/macros")
+        .arg("/macros:cmd.exe") // Target the same block as query
         .output()
         .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
         .unwrap_or_default();
@@ -230,8 +222,6 @@ pub fn alias_show_all() {
     // This will find the file, mesh them, and print the icons
     alias_lib::perform_audit(os_pairs);
 }
-
-// In alias_wrapper/src/lib.rs
 
 pub fn purge_ram_macros() -> io::Result<PurgeReport> {
     let mut report = PurgeReport { cleared: Vec::new(), failed: Vec::new() };
