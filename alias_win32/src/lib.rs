@@ -13,39 +13,100 @@ use std::io::Read;
 // For the Win32 version, we'll use winreg for a clean API-level check
 use winreg::RegKey;
 
+fn get_target_exe() -> *const u8 {
+    use std::sync::OnceLock;
+
+    struct PtrWrapper(*const u8);
+    unsafe impl Sync for PtrWrapper {}
+    unsafe impl Send for PtrWrapper {}
+
+    static BUCKET_PTR: OnceLock<PtrWrapper> = OnceLock::new();
+
+    BUCKET_PTR.get_or_init(|| {
+        // If the ALIAS_TEST_BUCKET env var exists, we ARE in a test. Period.
+        let is_test = std::env::var("ALIAS_TEST_BUCKET").is_ok() || cfg!(test);
+
+        if is_test {
+            PtrWrapper(b"alias_test_silo\0".as_ptr())
+        } else {
+            PtrWrapper(b"cmd.exe\0".as_ptr())
+        }
+    }).0
+}
+
+pub struct Win32LibraryInterface;
+
+
+impl alias_lib::AliasProvider for Win32LibraryInterface {
+    fn purge_ram_macros() -> io::Result<PurgeReport> {
+        purge_ram_macros()
+    }
+    fn reload_full(path: &Path, quiet: bool) -> io::Result<()> {
+        reload_full(path, quiet)
+    }
+    fn query_alias(name: &str, mode: OutputMode) -> Vec<String> {
+        query_alias(name, mode)
+    }
+    fn set_alias(opts: SetOptions, path: &Path, quiet: bool) -> io::Result<()> {
+        set_alias(opts, path, quiet)
+    }
+    fn run_diagnostics(path: &Path) {
+        run_diagnostics(path)
+    }
+    fn alias_show_all() {
+        alias_show_all()
+    }
+    fn install_autorun(quiet: bool) -> io::Result<()> {
+        install_autorun(quiet)
+    }
+}
+
 pub fn api_set_macro(name: &str, value: Option<&str>) -> bool {
     let (n_c, v_c) = (format!("{}\0", name), value.map(|v| format!("{}\0", v)));
     unsafe {
-        AddConsoleAliasA(n_c.as_ptr(), v_c.as_ref().map_or(std::ptr::null(), |v| v.as_ptr()), "cmd.exe\0".as_ptr()) != 0
+        AddConsoleAliasA(
+            n_c.as_ptr(),
+            v_c.as_ref().map_or(std::ptr::null(), |v| v.as_ptr()),
+            get_target_exe() // Use dynamic target
+        ) != 0
     }
 }
 
 // --- Logic Helpers ---
 
 pub fn reload_full(path: &Path, quiet: bool) -> io::Result<()> {
-    api_purge_all_macros(true);
+    // 1. Call the parameter-less version
+    let _ = purge_ram_macros();
+
+    // 2. Proceed with injection
     let count = parse_macro_file(path).into_iter()
         .filter(|(n, v)| api_set_macro(n, Some(v)))
         .count();
+
     qprintln!(quiet, "✨ API Reload: {} macros injected.", count);
     Ok(())
 }
 
-pub fn set_alias(name: &str, value: &str, path: &Path, quiet: bool) -> io::Result<()> {
-    let val_opt = if value.is_empty() { None } else { Some(value) };
-    if !api_set_macro(name, val_opt) {
+pub fn set_alias(opts: SetOptions, path: &Path, quiet: bool) -> io::Result<()> {
+    // 1. Determine if we respect the case or force lowercase (The Override)
+    let name = if opts.force_case { opts.name } else { opts.name.to_lowercase() };
+    let val_opt = if opts.value.is_empty() { None } else { Some(opts.value.as_str()) };
+
+    // 2. RAM Strike
+    if !api_set_macro(&name, val_opt) {
         eprintln!("⚠️ Kernel strike failed (Code {}).", unsafe { GetLastError() });
     }
 
-    let search = format!("{}=", name.to_lowercase());
-    let mut lines: Vec<String> = fs::read_to_string(path).unwrap_or_default()
-        .lines().filter(|l| !l.to_lowercase().starts_with(&search))
-        .map(String::from).collect();
+    // 3. Volatile check
+    if opts.volatile {
+        qprintln!(quiet, "⚡ Volatile alias (RAM Only): {}", name);
+        return Ok(());
+    }
 
-    if !value.is_empty() { lines.push(format!("{}={}", name, value)); }
-    fs::write(path, lines.join("\n") + "\n")?;
+    // 4. Disk Strike
+    update_disk_file(&name, &opts.value, path)?;
 
-    qprintln!(quiet, "✨ {} alias: {}", if value.is_empty() { "Deleted" } else { "Set" }, name);
+    qprintln!(quiet, "✨ {} alias: {}", if opts.value.is_empty() { "Deleted" } else { "Set" }, name);
     Ok(())
 }
 
@@ -89,7 +150,7 @@ pub fn install_autorun(quiet: bool) -> io::Result<()> {
 // --- Win32 Memory Iteration ---
 
 pub fn for_each_macro<F: FnMut(&str)>(mut f: F) {
-    let exe = "cmd.exe\0".as_ptr();
+    let exe = get_target_exe();
     unsafe {
         let len = GetConsoleAliasesLengthA(exe);
         if len > 0 {
@@ -101,14 +162,65 @@ pub fn for_each_macro<F: FnMut(&str)>(mut f: F) {
     }
 }
 
-pub fn api_show_all() { println!("[cmd.exe]"); for_each_macro(|e| println!("{}", e)); }
-pub fn api_purge_all_macros(quiet: bool) {
-    for_each_macro(|e| {
-        if let Some((n, _)) = e.split_once('=') {
-            if api_set_macro(n, None) { qprintln!(quiet, "🔥 Purged: [{}]", n); }
+pub fn purge_ram_macros() -> io::Result<PurgeReport> {
+    let mut report = PurgeReport {
+        cleared: Vec::new(),
+        failed: Vec::new(),
+    };
+
+    // We get the current state first
+    let active_macros = get_all_aliases();
+
+    for (name, _) in active_macros {
+        // Passing None to the value deletes the macro
+        if api_set_macro(&name, None) {
+            report.cleared.push(name);
+        } else {
+            let err = unsafe { GetLastError() };
+            report.failed.push((name, err));
         }
-    });
+    }
+
+    Ok(report)
 }
+
+pub fn alias_show_all() {
+    let os_pairs = get_all_aliases();
+    alias_lib::perform_audit(os_pairs);
+}
+
+pub fn get_all_aliases_raw() -> Vec<String> {
+    let exe_name = get_target_exe();
+
+    // 1. Get length
+    let len = unsafe { GetConsoleAliasesLengthA(exe_name as *mut u8) };
+    if len == 0 { return vec![]; }
+
+    // 2. Fetch
+    let mut buffer = vec![0u8; len as usize];
+    unsafe {
+        GetConsoleAliasesA(buffer.as_mut_ptr(), len, exe_name as *mut u8);
+    }
+
+    // 3. The Parse (Keeping the "None"/Empty slots if needed)
+    buffer.split(|&b| b == 0)
+        .map(|chunk| String::from_utf8_lossy(chunk).to_string())
+        // We only filter the very last entry if the buffer ended in a null
+        .filter(|s| !s.is_empty())
+        .collect()
+}
+
+pub fn get_all_aliases() -> Vec<(String, String)> {
+    get_all_aliases_raw()
+        .into_iter()
+        .filter_map(|line| {
+            // split_once('=') ensures we catch "name=" as ("name", "")
+            line.split_once('=').map(|(n, v)| (n.to_string(), v.to_string()))
+        })
+        .collect()
+}
+
+
 
 pub fn check_autorun_status() -> io::Result<String> {
     use windows_sys::Win32::System::Registry::{RegOpenKeyA, RegQueryValueExA, RegCloseKey, HKEY_CURRENT_USER};
@@ -132,7 +244,7 @@ pub fn check_autorun_status() -> io::Result<String> {
 
 pub fn query_alias(name: &str, mode: OutputMode) -> Vec<String> {
     let mut results = Vec::new();
-    let exe_name = "cmd.exe\0".as_ptr();
+    let target = get_target_exe(); // Use dynamic target
     let name_c = format!("{}\0", name);
     let mut buffer = [0u8; 2048];
 
@@ -141,17 +253,43 @@ pub fn query_alias(name: &str, mode: OutputMode) -> Vec<String> {
             name_c.as_ptr() as *mut u8,
             buffer.as_mut_ptr(),
             buffer.len() as u32,
-            exe_name as *mut u8,
+            target as *mut u8,
         );
-
         if result > 0 {
+            // Use result length strictly to avoid reading junk/nulls
             let output = String::from_utf8_lossy(&buffer[..result as usize]).to_string();
             results.push(output);
         } else if mode == OutputMode::Normal {
-            results.push(format!("⚠️ '{}' is not active in the current session.", name));
+            results.push(format!("⚠️ '{}' not active (Err: {})", name, GetLastError()));
         }
     }
     results
+}
+
+pub fn get_alias_list() -> Vec<String> {
+    let exe_name = get_target_exe();
+    // 1. Ask the kernel how big a buffer we need
+    let buffer_size = unsafe {
+        GetConsoleAliasesLengthA(exe_name as *mut u8)
+    };
+
+    if buffer_size == 0 { return vec![]; }
+
+    // 2. Allocate and fetch
+    let mut buffer = vec![0u8; buffer_size as usize];
+    unsafe {
+        GetConsoleAliasesA(
+            buffer.as_mut_ptr(),
+            buffer_size,
+            exe_name as *mut u8,
+        );
+    }
+
+    // 3. Parse the null-terminated block into a Vec of "name=value"
+    buffer.split(|&b| b == 0)
+        .filter(|chunk| !chunk.is_empty())
+        .map(|chunk| String::from_utf8_lossy(chunk).to_string())
+        .collect()
 }
 
 pub fn run_diagnostics(path: &Path) {
@@ -218,7 +356,7 @@ pub fn run_diagnostics(path: &Path) {
 /// Returns true if we can communicate with the console subsystem.
 pub fn is_api_responsive() -> bool {
     // We target "cmd.exe" as the default executable name for the alias subsystem
-    let exe = "cmd.exe\0".as_ptr();
+    let exe = get_target_exe();
 
     unsafe {
         // GetConsoleAliasesLengthA returns 0 if no aliases exist,

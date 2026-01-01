@@ -1,15 +1,18 @@
+// alias_hybrid/src/main.rs
+
 use std::{env, io};
 use std::path::Path;
 use std::process::Command;
+use windows_sys::Win32::System::Console::{AddConsoleAliasA, GetConsoleAliasesLengthA, GetConsoleAliasesA};
 
 
 // The Handshake - Accesses the shared brain in lib.rs
 use alias_lib::*;
 use alias_wrapper::*;
+use alias_win32::*;
 
 
-// Win32 API Imports for the primary strike
-use windows_sys::Win32::System::Console::{AddConsoleAliasA, GetConsoleAliasesLengthA, GetConsoleAliasesA};
+
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut args: Vec<String> = env::args().collect();
@@ -23,26 +26,36 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 2. The Hybrid Dispatcher
     match action {
         AliasAction::Clear => {
-            qprintln!(quiet, "🧹 Clearing RAM...");
-            if !api_purge_all_macros() {
-                // FALLBACK: If API fails, use the legacy scraper
-                let _ = legacy_clear_ram();
+            // Trigger the forensic purge
+            match alias_win32::purge_ram_macros() {
+                Ok(report) => {
+                    if report.is_fully_clean() {
+                        qprintln!(quiet, "🧹 RAM cleared ({} macros removed).", report.cleared.len());
+                    } else {
+                        eprintln!("⚠️ Partial Purge! {} cleared, {} failed.", report.cleared.len(), report.failed.len());
+                        for (name, code) in report.failed {
+                            eprintln!("   - [{}] Refused to die (Error Code: {})", name, code);
+                        }
+                    }
+                },
+                Err(e) => eprintln!("❌ Critical failure during purge: {}", e),
             }
         },
         AliasAction::Reload => reload_hybrid(&alias_path, quiet)?,
         AliasAction::ShowAll => {
-            // Try API first for speed, fallback to doskey /macros
-            if !api_show_all() {
-                let _ = Command::new("doskey").arg("/macros:all").status();
-            }
+            hybrid_show_all();
         },
         AliasAction::Query(term) => query_alias_hybrid(&term, &alias_path, mode),
-        AliasAction::Set { name, value } => set_alias_hybrid(&name, &value, &alias_path, quiet)?,
         AliasAction::Edit(ed) => {
             open_editor(&alias_path, ed, quiet)?;
             reload_hybrid(&alias_path, quiet)?;
         }
-        
+        AliasAction::Set(opts) => {
+            // Pass the entire options pack to the hybrid worker
+            if let Err(e) = set_alias_hybrid(opts, &alias_path, quiet) {
+                eprintln!("❌ Failed to set alias: {}", e);
+            }
+        }
         AliasAction::Which => alias_win32::run_diagnostics(&alias_path),
         AliasAction::Help => print_help(HelpMode::Full, Some(&alias_path)),
         AliasAction::Setup => {
@@ -63,69 +76,90 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 // --- Hybrid Logic: The "Best of Both Worlds" ---
 
 fn reload_hybrid(path: &Path, quiet: bool) -> io::Result<()> {
-    // Attempt API Reload (Fast)
-    api_purge_all_macros();
-    let definitions = parse_macro_file(path);
-    let mut success = false;
+    // 1. Wipe everything first (using our new hybrid clear)
+    let _ = clear_alias_hybrid(true);
 
+    let definitions = parse_macro_file(path);
+    let mut api_success_count = 0;
+
+    // 2. Attempt API Injection
     for (name, value) in &definitions {
-        if api_set_macro(name, Some(value)) {
-            success = true;
+        if alias_win32::api_set_macro(name, Some(value)) {
+            api_success_count += 1;
         }
     }
 
-    // If API failed to set anything, use Doskey as the safety net
-    if !success && !definitions.is_empty() {
-        qprintln!(quiet, "⚠️ API Strike failed. Falling back to Doskey...");
-        Command::new("doskey")
-            .arg(format!("/macrofile={}", path.display()))
-            .status()?;
+    // 3. Fallback: If the API missed any, let Doskey handle the whole file
+    if api_success_count < definitions.len() {
+        qprintln!(quiet, "⚠️ API missed {} macros. Running Doskey fallback...", definitions.len() - api_success_count);
+        alias_wrapper::reload_doskey(path)?;
     } else {
         qprintln!(quiet, "✨ API Reload: {} macros synced.", definitions.len());
     }
+
     Ok(())
 }
 
-fn set_alias_hybrid(name: &str, value: &str, path: &Path, quiet: bool) -> io::Result<()> {
-    // 1. RAM Strike (Try API, ignore failure because we hit Disk next)
-    let val_opt = if value.is_empty() { None } else { Some(value) };
-    if !api_set_macro(name, val_opt) {
-        // Fallback RAM strike via subprocess
-        let _ = Command::new("doskey").arg(format!("{}={}", name, value)).status();
+fn clear_alias_hybrid(quiet: bool) -> io::Result<()> {
+    // 1. Primary Strike: Win32 API
+    match alias_win32::purge_ram_macros() {
+        Ok(report) => {
+            if report.is_fully_clean() {
+                qprintln!(quiet, "🧹 RAM cleared via API ({} macros removed).", report.cleared.len());
+                return Ok(());
+            } else {
+                eprintln!("⚠️ API Partial Purge. Attempting Doskey fallback...");
+            }
+        },
+        Err(_) => {
+            eprintln!("⚠️ Win32 API unavailable. Falling back to Doskey...");
+        }
     }
 
-    // 2. Disk Strike (Lib Logic - The source of truth)
-    update_disk_file(name, value, path)?;
+    // 2. Fallback Strike: Doskey Wrapper
+    alias_wrapper::purge_ram_macros()?;
+    qprintln!(quiet, "🧹 RAM cleared via Doskey Wrapper.");
 
-    qprintln!(quiet, "✨ {} alias: {}", if value.is_empty() { "Deleted" } else { "Set" }, name);
+    Ok(())
+}
+
+fn set_alias_hybrid(opts: SetOptions, path: &Path, quiet: bool) -> io::Result<()> {
+    // 1. Prepare name/value based on flags
+    let name = if opts.force_case { opts.name } else { opts.name.to_lowercase() };
+    let value = opts.value.trim();
+    let val_opt = if value.is_empty() { None } else { Some(value) };
+
+    // 2. RAM Strike (Win32 API)
+    let api_success = alias_win32::api_set_macro(&name, val_opt);
+
+    // 3. RAM Fallback (Doskey)
+    if !api_success {
+        let _ = Command::new("doskey")
+            .arg(format!("{}={}", name, value))
+            .status();
+    }
+
+    // 4. Persistence Bypass (The "Volatile" Override)
+    if opts.volatile {
+        qprintln!(quiet, "⚡ Volatile alias (Session Only): {}", name);
+        return Ok(()); // Stop here!
+    }
+
+    // 5. Disk Strike (Persistence)
+    alias_lib::update_disk_file(&name, value, path)?;
+
+    if value.is_empty() {
+        qprintln!(quiet, "🗑️  Deleted: {}", name);
+    } else {
+        qprintln!(quiet, "✨ Set: {}={}", name, value);
+    }
+
     Ok(())
 }
 
 // --- Minimal API Wrappers for the Hybrid ---
 
-fn api_set_macro(name: &str, value: Option<&str>) -> bool {
-    let n_c = format!("{}\0", name);
-    let v_c = value.map(|v| format!("{}\0", v));
-    unsafe {
-        AddConsoleAliasA(
-            n_c.as_ptr(),
-            v_c.as_ref().map_or(std::ptr::null(), |v| v.as_ptr()),
-            "cmd.exe\0".as_ptr()
-        ) != 0
-    }
-}
-
-fn api_purge_all_macros() -> bool {
-    let mut success = false;
-    for_each_macro(|e| {
-        if let Some((n, _)) = e.split_once('=') {
-            if api_set_macro(n, None) { success = true; }
-        }
-    });
-    success
-}
-
-fn api_show_all() -> bool {
+fn alias_show_everything() -> bool {
     let mut found = false;
     for_each_macro(|e| {
         if !found { println!("[cmd.exe]"); found = true; }
@@ -176,4 +210,13 @@ fn query_alias_hybrid(term: &str, path: &Path, mode: OutputMode) {
     for line in output {
         println!("{}", line);
     }
+}
+
+
+fn hybrid_show_all() {
+    let w32 = alias_win32::get_all_aliases();
+    let wrap = alias_wrapper::get_all_aliases();
+    let file = alias_lib::dump_alias_file();
+
+    perform_triple_audit(w32, wrap, file);
 }

@@ -10,6 +10,32 @@ use std::process::Command;
 use alias_lib::*;
 use alias_lib::qprintln;
 
+pub struct WrapperLibraryInterface;
+
+impl alias_lib::AliasProvider for WrapperLibraryInterface {
+    fn purge_ram_macros() -> io::Result<PurgeReport> {
+        purge_ram_macros()
+    }
+    fn reload_full(path: &Path, quiet: bool) -> io::Result<()> {
+        reload_full(path, quiet)
+    }
+    fn query_alias(name: &str, mode: OutputMode) -> Vec<String> {
+        query_alias(name, mode)
+    }
+    fn set_alias(opts: SetOptions, path: &Path, quiet: bool) -> io::Result<()> {
+        set_alias(opts, path, quiet)
+    }
+    fn run_diagnostics(path: &Path) {
+        run_diagnostics(path)
+    }
+    fn alias_show_all() {
+        alias_show_all()
+    }
+    fn install_autorun(quiet: bool) -> io::Result<()> {
+        install_autorun(quiet)
+    }
+}
+
 pub fn reload_doskey(path: &Path) -> io::Result<()> {
     Command::new("doskey")
         .arg(format!("/macrofile={}", path.display()))
@@ -17,41 +43,54 @@ pub fn reload_doskey(path: &Path) -> io::Result<()> {
         .map(|_| ())
 }
 
-pub fn set_alias(name: &str, value: &str, path: &Path, quiet: bool) -> io::Result<()> {
-    let content = fs::read_to_string(path).unwrap_or_default();
-    // Trim the name just in case a space sneaked through the parser
-    let clean_name = name.trim();
-    let search = format!("{}=", clean_name.to_lowercase());
+pub fn set_alias(opts: SetOptions, path: &Path, quiet: bool) -> io::Result<()> {
+    // 1. Respect the flags from the struct
+    let name = if opts.force_case { opts.name } else { opts.name.to_lowercase() };
 
-    let mut lines: Vec<String> = content.lines()
-        .filter(|l| !l.to_lowercase().starts_with(&search))
-        .map(|l| l.to_string())
-        .collect();
-
-    if !value.is_empty() {
-        lines.push(format!("{}={}", name, value));
+    // 2. The Disk Strike (Skip if --temp)
+    if !opts.volatile {
+        // Use your existing logic to update the .doskey file
+        update_disk_file(&name, &opts.value, path)?;
     }
 
-    fs::write(path, lines.join("\n") + "\n")?;
-    reload_doskey(path)?;
+    // 3. The RAM Strike (Fallback to Doskey.exe)
+    // We pass the name and value to doskey so it's active immediately
+    let status = std::process::Command::new("doskey")
+        .arg(format!("{}={}", name, opts.value))
+        .status()?;
 
-    if value.is_empty() {
-        qprintln!(quiet, "🗑️  Deleted alias: {}", name);
-    } else {
-        qprintln!(quiet, "✨ Set alias: {}={}", name, value);
+    if status.success() {
+        let tag = if opts.volatile { "(volatile)" } else { "(saved)" };
+        qprintln!(quiet, "✨ Wrapper set {}: {}={}", tag, name, opts.value);
     }
+
     Ok(())
 }
 
 /// Perfroms a "Hard Sync": Wipes RAM then loads from disk
-pub fn reload_full(path: &Path) -> io::Result<()> {
-    clear_ram_macros()?;
-    Command::new("doskey")
-        .arg(format!("/macrofile={}", path.display()))
-        .status()
-        .map(|_| ())
-}
+pub fn reload_full(path: &Path, quiet: bool) -> io::Result<()> {
+    // 1. Clear the current session
+    purge_ram_macros()?;
 
+    // 2. Count the macros in the file (assuming 1 macro per line)
+    let content = std::fs::read_to_string(path)?;
+    let count = content.lines()
+        .filter(|l| !l.trim().is_empty() && !l.trim().starts_with(';')) // Ignore empty and comments
+        .count();
+
+    // 3. Execute the Doskey reload
+    let status = Command::new("doskey")
+        .arg(format!("/macrofile={}", path.display()))
+        .status()?;
+
+    if !status.success() {
+        return Err(io::Error::new(io::ErrorKind::Other, "Doskey failed to load file"));
+    }
+
+    // 4. Now 'count' exists!
+    qprintln!(quiet, "✨ Wrapper Reload: {} macros injected.", count);
+    Ok(())
+}
 /// Hooks the tool into the CMD AutoRun registry key
 pub fn install_autorun(quiet: bool) -> io::Result<()> {
     let exe_path = env::current_exe()?;
@@ -79,27 +118,6 @@ pub fn install_autorun(quiet: bool) -> io::Result<()> {
         ));
     }
 
-    Ok(())
-}
-
-pub fn clear_ram_macros() -> io::Result<()> {
-    let output = Command::new("doskey").arg("/macros").output()?;
-    let stdout = String::from_utf8_lossy(&output.stdout);
-
-    for line in stdout.lines() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('[') { continue; }
-
-        if let Some(pos) = line.find('=') {
-            let name = &line[..pos];
-
-            // DIRECT CALL: No 'cmd /c', no extra shell layer.
-            // This is likely how it was working when it worked.
-            let _ = Command::new("doskey")
-                .arg(format!("{}=", name))
-                .status();
-        }
-    }
     Ok(())
 }
 
@@ -187,4 +205,60 @@ pub fn get_autorun_command(alias_path: &Path) -> String {
         current_exe.display(),
         alias_path.display()
     )
+}
+
+pub fn get_all_aliases() -> Vec<(String, String)> {
+    let output = std::process::Command::new("doskey")
+        .arg("/macros")
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
+        .unwrap_or_default();
+
+    output.lines()
+        .filter_map(|line| {
+            // split_once preserves the "Beast" (everything after the first '=')
+            line.split_once('=').map(|(n, v)| (n.trim().to_string(), v.to_string()))
+        })
+        .collect()
+}
+
+pub fn alias_show_all() {
+    // 1. Get the wrapper-specific data
+    let os_pairs = get_all_aliases();
+
+    // 2. Hand off to the WRUM engine in alias_lib
+    // This will find the file, mesh them, and print the icons
+    alias_lib::perform_audit(os_pairs);
+}
+
+// In alias_wrapper/src/lib.rs
+
+pub fn purge_ram_macros() -> io::Result<PurgeReport> {
+    let mut report = PurgeReport { cleared: Vec::new(), failed: Vec::new() };
+
+    // 1. Snapshot Before
+    let before = get_all_aliases();
+
+    // 2. Perform the Purge
+    for (name, _) in &before {
+        let status = Command::new("doskey")
+            .arg(format!("{}=", name))
+            .status()?;
+
+        if status.success() {
+            report.cleared.push(name.clone());
+        }
+    }
+
+    // 3. Snapshot After to find the "Unkillable" ones
+    let after = get_all_aliases();
+    for (name, _) in after {
+        // If it's still there, it failed to delete (moved from cleared to failed)
+        if let Some(pos) = report.cleared.iter().position(|x| x == &name) {
+            report.cleared.remove(pos);
+            report.failed.push((name, 0)); // 0 as a placeholder for Win32 Error Code
+        }
+    }
+
+    Ok(report)
 }

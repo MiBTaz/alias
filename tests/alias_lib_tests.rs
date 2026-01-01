@@ -5,6 +5,15 @@ use std::env;
 use std::fs;
 use std::path::PathBuf;
 
+fn mock_set(name: &str, value: &str) -> AliasAction {
+    AliasAction::Set(SetOptions {
+        name: name.to_string(),
+        value: value.to_string(),
+        volatile: false,
+        force_case: false,
+    })
+}
+
 // --- PARSER TESTS ---
 
 #[test]
@@ -24,10 +33,15 @@ fn test_set_with_equals() {
     let args = vec!["alias".to_string(), "gs=git".to_string(), "status".to_string()];
     assert_eq!(
         parse_alias_args(&args),
-        (AliasAction::Set {
-            name: "gs".to_string(),
-            value: "git status".to_string()
-        }, false)
+        (
+            AliasAction::Set(SetOptions {
+                name: "gs".to_string(),
+                value: "git status".to_string(),
+                volatile: false,
+                force_case: false,
+            }),
+            false
+        )
     );
 }
 
@@ -36,10 +50,15 @@ fn test_set_with_space() {
     let args = vec!["alias".to_string(), "vi".to_string(), "nvim".to_string(), "-o".to_string()];
     assert_eq!(
         parse_alias_args(&args),
-        (AliasAction::Set {
-            name: "vi".to_string(),
-            value: "nvim -o".to_string()
-        }, false)
+        ( // <--- ERROR 1: Needed opening parenthesis for the tuple
+          AliasAction::Set(SetOptions {
+              name: "vi".to_string(),      // <--- ERROR 3: Needed .to_string()
+              value: "nvim -o".to_string(), // <--- ERROR 3: Needed .to_string()
+              volatile: false,
+              force_case: false,           // <--- ERROR 2: Was missing / duplicated
+          }),
+          false
+        ) // <--- ERROR 1: Needed closing parenthesis for the tuple
     );
 }
 
@@ -48,10 +67,15 @@ fn test_delete_syntax() {
     let args = vec!["alias".to_string(), "junk=".to_string()];
     assert_eq!(
         parse_alias_args(&args),
-        (AliasAction::Set {
-            name: "junk".to_string(),
-            value: "".to_string()
-        }, false)
+        (
+            AliasAction::Set(SetOptions {
+                name: "junk".to_string(),
+                value: "".to_string(),
+                volatile: false,
+                force_case: false,
+            }),
+            false
+        )
     );
 }
 
@@ -104,19 +128,30 @@ fn test_edit_synonym_with_override() {
 fn test_quiet_flag_detection() {
     let args1 = vec!["alias".into(), "--quiet".into(), "gs=git status".into()];
     let (action1, quiet1) = parse_alias_args(&args1);
+
     assert!(quiet1);
-    assert_eq!(action1, AliasAction::Set { name: "gs".into(), value: "git status".into() });
+    assert_eq!(
+        action1,
+        AliasAction::Set(SetOptions {
+            name: "gs".into(),
+            value: "git status".into(),
+            volatile: false,
+            force_case: false,
+        })
+    );
 }
 
 #[test]
 fn test_set_complex_value_with_spaces() {
     let args = vec!["alias".into(), "my_cmd".into(), "echo".into(), "hi".into()];
     let (action, _) = parse_alias_args(&args);
-    if let AliasAction::Set { name, value } = action {
-        assert_eq!(name, "my_cmd");
-        assert_eq!(value, "echo hi");
+
+    // Destructure the tuple variant 'Set' to get the 'opts' struct
+    if let AliasAction::Set(opts) = action {
+        assert_eq!(opts.name, "my_cmd");
+        assert_eq!(opts.value, "echo hi");
     } else {
-        panic!("Set failed");
+        panic!("Expected AliasAction::Set, got {:?}", action);
     }
 }
 
@@ -173,14 +208,20 @@ fn test_multiple_quiet_flags() {
 }
 
 #[test]
-fn test_set_with_multiple_equals() {
+fn test_set_multiple_equals() {
     // Testing: alias logic="a=b" (The first equals should be the split point)
     let args = vec!["alias".into(), "logic=a=b".into()];
     let (action, _) = parse_alias_args(&args);
-    assert_eq!(action, AliasAction::Set {
-        name: "logic".into(),
-        value: "a=b".into()
-    });
+
+    assert_eq!(
+        action,
+        AliasAction::Set(SetOptions {
+            name: "logic".into(),
+            value: "a=b".into(),
+            volatile: false,
+            force_case: false,
+        })
+    );
 }
 
 #[test]
@@ -208,15 +249,21 @@ fn test_opts_injection_logic() {
     let mut args = vec!["alias".to_string(), "g=git".to_string(), "status".to_string()];
     let extra_opts = vec!["--quiet".to_string()];
 
+    // Injects "--quiet" at index 1
     args.splice(1..1, extra_opts);
 
     let (action, quiet) = parse_alias_args(&args);
     assert!(quiet);
-    if let AliasAction::Set { name, value } = action {
-        assert_eq!(name, "g");
-        assert_eq!(value, "git status");
+
+    // FIX: Change { name, value } to (opts)
+    if let AliasAction::Set(opts) = action {
+        assert_eq!(opts.name, "g");
+        assert_eq!(opts.value, "git status");
+        // Extra credit: verify flags were defaulted correctly
+        assert!(!opts.volatile);
+        assert!(!opts.force_case);
     } else {
-        panic!("Failed to parse Set action after injection");
+        panic!("Failed to parse Set action after injection. Got: {:?}", action);
     }
 }
 
@@ -224,9 +271,13 @@ fn test_opts_injection_logic() {
 fn test_empty_value_is_delete() {
     let args = vec!["alias".to_string(), "old_alias=".to_string()];
     let (action, _) = parse_alias_args(&args);
-    if let AliasAction::Set { name, value } = action {
-        assert_eq!(name, "old_alias");
-        assert_eq!(value, ""); // Should be interpreted as a deletion
+
+    // Pattern match on the new Tuple Variant
+    if let AliasAction::Set(opts) = action {
+        assert_eq!(opts.name, "old_alias");
+        assert_eq!(opts.value, ""); // Verified: empty value is captured correctly
+    } else {
+        panic!("Expected AliasAction::Set, got {:?}", action);
     }
 }
 
@@ -235,9 +286,13 @@ fn test_space_separator_set() {
     // Testing the "alias name value" alternate syntax
     let args = vec!["alias".to_string(), "ll".to_string(), "ls".to_string(), "-la".to_string()];
     let (action, _) = parse_alias_args(&args);
-    if let AliasAction::Set { name, value } = action {
-        assert_eq!(name, "ll");
-        assert_eq!(value, "ls -la");
+
+    // FIX: Match on the tuple variant 'Set' and access the 'opts' struct
+    if let AliasAction::Set(opts) = action {
+        assert_eq!(opts.name, "ll");
+        assert_eq!(opts.value, "ls -la");
+    } else {
+        panic!("Space separator parsing failed. Got: {:?}", action);
     }
 }
 
@@ -251,7 +306,7 @@ fn test_path_with_spaces_healthy() {
 
 #[test]
 fn test_quiet_injection_from_env() {
-    // 1. Simulate the initial args from the OS (alias set g=status)
+    // 1. Simulate the initial args from the OS (alias g status)
     let mut args = vec![
         "alias".to_string(),
         "g".to_string(),
@@ -271,11 +326,12 @@ fn test_quiet_injection_from_env() {
     // 4. Assertions
     assert!(quiet, "The quiet flag should be true when --quiet is injected");
 
-    if let AliasAction::Set { name, value } = action {
-        assert_eq!(name, "g");
-        assert_eq!(value, "status");
+    // FIX: Match on the tuple variant (opts)
+    if let AliasAction::Set(opts) = action {
+        assert_eq!(opts.name, "g");
+        assert_eq!(opts.value, "status");
     } else {
-        panic!("Action should have been AliasAction::Set");
+        panic!("Action should have been AliasAction::Set, but got {:?}", action);
     }
 }
 
@@ -284,8 +340,18 @@ fn test_quiet_extraction() {
     let args = vec!["alias".to_string(), "--quiet".to_string(), "g=status".to_string()];
     let (action, quiet) = parse_alias_args(&args);
 
-    assert!(quiet); // The bool is caught
-    assert_eq!(action, AliasAction::Set { name: "g".into(), value: "status".into() }); // Action is clean
+    assert!(quiet); // The bool is successfully caught
+
+    // FIX: Match against the new Tuple Variant and Struct
+    assert_eq!(
+        action,
+        AliasAction::Set(SetOptions {
+            name: "g".into(),
+            value: "status".into(),
+            volatile: false,
+            force_case: false,
+        })
+    );
 }
 
 #[test]
@@ -338,19 +404,16 @@ fn test_deletion_logic_path() {
     let value = "";
     let input = format!("{}={}", name, value);
 
-    // We create the vector but keep it as a separate binding.
-    // This way, 'input' stays alive in the scope of the test.
     let args = vec!["alias".to_string(), input];
 
-    // We pass a reference to the vector's contents.
+    // parse_alias_args returns (AliasAction, bool)
     let action = parse_alias_args(&args).0;
 
-    if let AliasAction::Set { name: n, value: v } = action {
-        assert_eq!(n, name);
-        assert_eq!(v, value);
+    // FIX: Destructure the tuple variant 'Set' to get 'opts'
+    if let AliasAction::Set(opts) = action {
+        assert_eq!(opts.name, name);
+        assert_eq!(opts.value, value);
     } else {
-        // Now 'args[1]' is used here, and it's perfectly valid
-        // because 'args' hasn't been dropped or moved yet.
         panic!("Parser failed to identify '{}' as a Set/Delete action", args[1]);
     }
 }
@@ -416,12 +479,14 @@ fn test_reload_line_parsing() {
 fn test_parse_set_equals() {
     let args = vec!["alias".to_string(), "rust=cargo".to_string()];
     let (action, _) = parse_alias_args(&args);
+
     match action {
-        AliasAction::Set { name, value } => {
-            assert_eq!(name, "rust");
-            assert_eq!(value, "cargo");
+        // FIX: Match the tuple variant and access the inner struct
+        AliasAction::Set(opts) => {
+            assert_eq!(opts.name, "rust");
+            assert_eq!(opts.value, "cargo");
         }
-        _ => panic!("Expected Set action"),
+        _ => panic!("Expected Set action, but got: {:?}", action),
     }
 }
 
@@ -429,12 +494,14 @@ fn test_parse_set_equals() {
 fn test_parse_set_space() {
     let args = vec!["alias".to_string(), "rust".to_string(), "cargo".to_string()];
     let (action, _) = parse_alias_args(&args);
+
     match action {
-        AliasAction::Set { name, value } => {
-            assert_eq!(name, "rust");
-            assert_eq!(value, "cargo");
+        // FIX: Match the tuple variant and access the opts fields
+        AliasAction::Set(opts) => {
+            assert_eq!(opts.name, "rust");
+            assert_eq!(opts.value, "cargo");
         }
-        _ => panic!("Expected Set action"),
+        _ => panic!("Expected Set action, got {:?}", action),
     }
 }
 
@@ -461,3 +528,105 @@ fn test_complex_deletion_logic() {
     assert!(!result.contains("cdx="), "The complex ghost of cdx should be removed from the string");
     assert!(result.contains("ls=dir"), "Other lines should be preserved");
 }
+
+// alias_lib/src/lib.rs
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_mesh_logic_merges_correctly() {
+        let os = vec![("test".to_string(), "live".to_string())];
+        let file = vec![("test".to_string(), "config".to_string())];
+
+        let mesh = mesh_logic(os, file);
+
+        assert_eq!(mesh.len(), 1);
+        assert_eq!(mesh[0].os_value, Some("live".to_string()));
+        assert_eq!(mesh[0].file_value, Some("config".to_string()));
+    }
+
+    #[test]
+    fn test_beast_detection() {
+        let entry = AliasEntryMesh {
+            name: "cdx".to_string(),
+            os_value: Some("".to_string()), // The Beast/Ghost
+            file_value: Some("actual_path".to_string()),
+        };
+        assert!(entry.is_empty_definition());
+    }
+}
+
+#[test]
+fn test_sovereign_gatekeeper_logic() {
+    // Harsh: No spaces, alphanumeric start
+    assert!(is_valid_name("git123"));
+    assert!(!is_valid_name(" git"));      // Leading space
+    assert!(!is_valid_name("git "));      // Trailing space
+    assert!(!is_valid_name("g s"));       // Internal space
+    assert!(!is_valid_name("-git"));      // Symbol start
+    assert!(!is_valid_name("\"git\""));   // Quote start
+
+    // Loose: Spaces allowed later (for the Beast), alphanumeric start
+    assert!(is_valid_name_loose("gs=git status"));
+    assert!(!is_valid_name_loose(" gs=git"));      // Leading space still kills it
+    assert!(!is_valid_name_loose("=git status"));  // Empty name kills it
+}
+
+#[test]
+fn test_macro_file_ingest_resilience() {
+    let content = "
+        # Valid Comment
+        ls=dir /w
+        // Another Comment
+        -bad=should be ignored
+          leading_space=ignored
+        valid_name = trimmed_value
+        :: Old school comment
+        [section]
+        name with space=ignored
+    ";
+
+    let results: Vec<(String, String)> = content.lines()
+        .map(|l| l.trim())
+        .filter_map(|l| l.split_once('='))
+        .filter(|(k, _)| is_valid_name(k.trim()))
+        .map(|(k, v)| (k.trim().to_string(), v.trim().to_string()))
+        .collect();
+
+    // Now expecting 3 because we allow indented aliases!
+    assert_eq!(results.len(), 3);
+    assert_eq!(results[0].0, "ls");
+    assert_eq!(results[1].0, "leading_space");
+    assert_eq!(results[2].0, "valid_name");
+}
+
+#[test]
+fn test_parser_beast_and_flags() {
+    // Test: Volatile + Force + The Beast
+    let args = vec!["alias".into(), "--temp".into(), "--force".into(), "gpp=g++ -std=c++20".into()];
+    let (action, _) = parse_alias_args(&args);
+
+    if let AliasAction::Set(opts) = action {
+        assert_eq!(opts.name, "gpp");
+        assert_eq!(opts.value, "g++ -std=c++20");
+        assert!(opts.volatile);
+        assert!(opts.force_case);
+    } else {
+        panic!("Failed to parse complex set action");
+    }
+}
+
+#[test]
+fn test_jason_prevention_on_cli() {
+    // Attempting to inject JSON or Quoted strings
+    let args = vec!["alias".into(), "{\"key\":\"val\"}".into()];
+    let (action, _) = parse_alias_args(&args);
+    assert_eq!(action, AliasAction::Invalid);
+
+    let args2 = vec!["alias".into(), "\"ls\"=dir".into()];
+    let (action2, _) = parse_alias_args(&args2);
+    assert_eq!(action2, AliasAction::Invalid);
+}
+

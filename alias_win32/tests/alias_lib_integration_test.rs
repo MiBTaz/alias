@@ -22,24 +22,5 @@ fn test_local_logic() {
 /// ---------------------------------------------------------
 #[cfg(test)]
 #[path = "../../tests/alias_lib_tests.rs"]
-mod shared_lib;
+mod shared_under_win32;
 
-/// ---------------------------------------------------------
-/// 3. THE WRAPPER SPECIALIST (Muscle Test 2)
-/// ---------------------------------------------------------
-#[cfg(test)]
-mod wrapper_specialist {
-    // 1. Bring the muscle into this room
-    #[allow(unused_imports)]
-    use alias_lib::*;
-    #[allow(unused_imports)]
-    use alias_win32::*;
-
-    // 2. Point to the shared test file
-    #[path = "../../tests/alias_win32_wrapper.rs"]
-    mod shared_muscle {
-        // 3. THIS IS THE KEY: Reach up and grab 'set_alias' from the parent room
-        #[allow(unused_imports)]
-        use super::*;
-    }
-}
