@@ -3,16 +3,95 @@
 use std::env;
 use std::fs;
 use std::io;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::{SystemTime, UNIX_EPOCH};
 
-// --- Macros ---
 #[macro_export]
-macro_rules! qprintln {
-    ($quiet:expr, $($arg:tt)*) => {
-        if !$quiet { println!($($arg)*); }
+macro_rules! trace {
+    ($($arg:tt)*) => {
+        #[cfg(any(debug_assertions, test))]
+        {
+            eprintln!("[TRACE] {}", format!($($arg)*));
+        }
     };
 }
+
+#[macro_export]
+macro_rules! voice {
+    // If the user passes 'Off' or 'On' directly
+    ($level:ident, Off, Off) => {
+        $crate::Verbosity {
+            level: $crate::VerbosityLevel::$level,
+            decorations: false,
+            show_tips: false,
+        }
+    };
+    // General case for ShowFeature::Off or variables
+    ($level:ident, $icons:expr, $tips:expr) => {
+        $crate::Verbosity {
+            level: $crate::VerbosityLevel::$level,
+            decorations: $icons.is_on(),
+            show_tips: $tips.is_on(),
+        }
+    };
+}
+
+#[macro_export]
+#[doc(hidden)]
+macro_rules! to_bool {
+    // These match specific expressions before falling back to the generic .is_on()
+    (On) => { true };
+    (Off) => { false };
+    (ShowIcons::On) => { true };
+    (ShowIcons::Off) => { false };
+    (ShowTips::On) => { true };
+    (ShowTips::Off) => { false };
+    (ShowFeature::On) => { true };
+    (ShowFeature::Off) => { false };
+    ($val:expr) => { $val.is_on() };
+}
+
+macro_rules! impl_voice_macro {
+    ($macro_name:ident, $method:ident, $default_icon:ident, $d:tt) => {
+        #[macro_export]
+        macro_rules! $macro_name {
+            // 1. Icon + Format String + Args
+            ($v:expr, $icon:expr, $fmt:literal, $d($d arg:tt)+) => {{
+                let msg = format!($fmt, $d($d arg)+);
+                let formatted = $v.icon_format($icon, &msg);
+                $v.$method(&formatted)
+            }};
+
+            // 2. Icon + Static String
+            ($v:expr, $icon:expr, $msg:expr) => {{
+                let formatted = $v.icon_format($icon, $msg);
+                $v.$method(&formatted)
+            }};
+
+            // 3. Default Icon + Format String + Args
+            ($v:expr, $fmt:literal, $d($d arg:tt)+) => {{
+                let msg = format!($fmt, $d($d arg)+);
+                let formatted = $v.icon_format($crate::AliasIcon::$default_icon, &msg);
+                $v.$method(&formatted)
+            }};
+
+            // 4. Default Icon + Static String
+            ($v:expr, $msg:expr) => {{
+                let formatted = $v.icon_format($crate::AliasIcon::$default_icon, $msg);
+                $v.$method(&formatted)
+            }};
+        }
+    };
+}
+
+// Generate the suite
+impl_voice_macro!(say,     say,     Say,     $);
+impl_voice_macro!(whisper, whisper, Whisper, $);
+impl_voice_macro!(shout,   shout,   Shout,   $);
+impl_voice_macro!(scream,  scream,  Scream,  $);
+impl_voice_macro!(text,    text,    Text,    $);
 
 // --- Shared Constants ---
 pub const ENV_ALIAS_FILE: &str = "ALIAS_FILE";
@@ -24,53 +103,162 @@ pub const FALLBACK_EDITOR: &str = "notepad";
 pub const REG_CURRENT_USER: &str = "HKCU";
 pub const PATH_SEPARATOR: &str = "\\";
 pub const REG_SUBKEY: &str = "Software\\Microsoft\\Command Processor";
-pub const REG_SUBKEY_NULL: &str = "Software\\Microsoft\\Command Processor\0";
 pub const REG_AUTORUN_KEY: &str = "AutoRun";
-pub const REG_AUTORUN_KEY_NULL: &str = "AutoRun\0";
 
+// --- Output Identity Logic (The Matrix) ---
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[repr(usize)]
+pub enum VerbosityLevel {
+    Mute = 0,   // Total silence
+    Silent = 1, // Whisper/Data only
+    Normal = 2, // Standard use
+    Loud = 3,   // Audit/Verbose
+}
 
-// --- Enums ---
 #[derive(Debug, Clone, Copy)]
-pub enum HelpMode { Short, Full }
+#[repr(usize)]
+pub enum AliasIcon {
+    None    = 0,  Win32 = 1,  Doskey = 2,  Disk        = 3,  Alert = 4,
+    Success = 5,  Info  = 6,  Say    = 7,  Whisper     = 8,  Shout = 9,
+    Scream  = 10, Fail  = 11, Hint   = 12, Environment = 13, Ok    = 14,
+    Tools   = 15, File  = 16, Path   = 17, Text        = 18,
+    _VariantCount,
+}
+
+pub const ICON_TYPES: usize = AliasIcon::_VariantCount as usize;
+
+pub static ICON_MATRIX: [[&str; 2]; ICON_TYPES] = [
+    ["", ""], // None
+    ["W",  "⚡ "], // Win32
+    ["K",  "🔑 "], // Doskey
+    ["D",  "💽 "], // Disk
+    ["!!", "⚠️  "], // Alert
+    ["OK", "✨ "], // Success
+    ["I",  "ℹ️  "], // Info
+    ["-",  "📜  "], // Say
+    ["_",  "➢  "], // Whisper
+    ["!",  "🚫  "], // Shout
+    ["!!", "⛔  "], // Scream
+    ["X",  "❌  "], // Fail
+    ["H",  "💡  "], // Hint
+    ["E",  "♻️  "], // Env
+    ["+",  "✅  "], // OK
+    ["#",  "🛠️  "], // Tools
+    ["F",  "📁  "], // File
+    ["P",  "🛣️  "], // Path
+    ["T",  "️💬  "], // Text
+
+];
+
 
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub enum SetupStatus {
-    Synced,   // ✅ Everything is good
-    Mismatch, // ⚠️ AutoRun exists but doesn't point to us
-    NotFound, // ❌ Not installed
+pub struct Verbosity {
+    pub level: VerbosityLevel,
+    pub decorations: bool,
+    pub show_tips: bool,
 }
 
-#[derive(Debug, PartialEq, Clone, Copy)]
-pub enum OutputMode {
-    Silent,
-    Normal,
-    DataOnly, // Returns the string but prints nothing
-}
-
-impl OutputMode {
-    pub fn set_quiet(quiet: bool) -> Self {
-        if quiet { Self::Silent } else { Self::Normal }
+impl Verbosity {
+    pub fn is_silent(&self) -> bool {
+        self.level == VerbosityLevel::Silent
     }
-    pub fn is_quiet(&self) -> bool {
-        match self {
-            OutputMode::Silent => true,
-            OutputMode::DataOnly => true,
-            OutputMode::Normal => false,
+
+    pub fn normal() -> Self {
+        Self {
+            level: VerbosityLevel::Normal,
+            decorations: true,
+            show_tips: true,
+        }
+    }
+
+    pub fn silent() -> Self {
+        Self {
+            level: VerbosityLevel::Silent,
+            decorations: false,
+            show_tips: false,
+        }
+    }
+
+    pub fn get_icon_str(&self, id: AliasIcon) -> &'static str {
+        ICON_MATRIX[id as usize][self.decorations as usize]
+    }
+
+    pub fn icon_format(&self, icon: AliasIcon, msg: &str) -> String {
+        if !self.decorations || msg.is_empty() {
+            return msg.to_string();
+        }
+        format!("{} {}", self.get_icon_str(icon), msg)
+    }
+
+    pub fn tip(&self, msg: Option<&str>) {
+        if !self.show_tips { return }
+        if let Some(m) = msg {
+            // We use Hint icon (💡) for tips
+            let formatted = self.icon_format(AliasIcon::Hint, m);
+            self.say(&formatted);
+        }
+    }
+    pub fn show_audit(&self) -> bool { self.level >= VerbosityLevel::Normal }
+    pub fn show_xmas_lights(&self) -> bool { self.decorations && self.show_audit() }
+
+    pub fn text(&self, msg: &str) -> String {
+        return msg.to_string();
+    }
+
+    pub fn whisper(&self, msg: &str) {
+        // Keep your level check, just add the "Empty String" skip
+        if msg.is_empty() || self.level < VerbosityLevel::Silent { return }
+        println!("{}", msg);
+    }
+
+    pub fn say(&self, msg: &str) {
+        if msg.is_empty() || self.level < VerbosityLevel::Normal { return }
+        println!("{}", msg);
+    }
+
+    pub fn shout(&self, msg: &str) {
+        if msg.is_empty() || self.level <= VerbosityLevel::Mute { return }
+        println!("{}", msg);
+    }
+
+    pub fn scream(&self, msg: &str) {
+        if msg.is_empty() { return } // Even a scream needs words!
+        eprintln!("{}", msg);
+    }
+
+    pub fn audit(&self, msg: &str) {
+        if msg.is_empty() { return }
+        if self.level == VerbosityLevel::Loud {
+            println!("{}", self.icon_format(AliasIcon::Info, msg));
+        }
+    }
+
+    pub fn align(&self, name: &str, value: &str, width: usize, wdf: (bool, bool, bool)) {
+        if self.level == VerbosityLevel::Mute { return; }
+        let display_val = if value.is_empty() { "<EMPTY>" } else { value };
+        let line = format!("{}={}", name, display_val);
+
+        if self.show_audit() {
+            let (w, d, f) = wdf;
+            let w_m = if w { self.get_icon_str(AliasIcon::Win32) } else { " " };
+            let d_m = if d { self.get_icon_str(AliasIcon::Doskey) } else { " " };
+            let f_m = if f { self.get_icon_str(AliasIcon::File) } else { " " };
+            println!("{:width$} [{}{}{}]", line, w_m, d_m, f_m, width = width);
+        } else {
+            println!("{}", line);
         }
     }
 }
 
-pub fn print_results(results: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
-    for line in results {
-        println!("{}", line);
-    }
-    Ok(())
-}
+// --- Data Structures ---
+
+#[derive(Debug, Clone, Copy)]
+pub enum HelpMode { Short, Full }
 
 #[derive(Debug, PartialEq, Clone)]
 pub enum AliasAction {
-    Set (SetOptions),
+    Set(SetOptions),
     Query(String),
     Edit(Option<String>),
     Clear,
@@ -82,304 +270,456 @@ pub enum AliasAction {
     Invalid,
 }
 
-#[derive(Debug, Clone, PartialEq)]
-pub struct AliasEntry {
-    pub name: String,
-    pub value: String, // This holds the full RHS, including any "quotes"
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ShowFeature {
+    On,
+    Off,
 }
 
-// export necessities.
-pub trait AliasProvider {
-    fn purge_ram_macros() -> io::Result<PurgeReport>;
-    fn reload_full(path: &Path, quiet: bool) -> io::Result<()>;
-    fn query_alias(name: &str, mode: OutputMode) -> Vec<String>;
-    fn set_alias(opts: SetOptions, path: &Path, quiet: bool) -> io::Result<()>;
-    fn run_diagnostics(path: &Path);
-    fn alias_show_all();
-    fn install_autorun(quiet: bool) -> io::Result<()>;
-}
-
-pub fn run<P: AliasProvider>(   action: AliasAction,
-                                quiet: bool,
-                                path: &Path )
-                             -> Result<(), Box<dyn std::error::Error>> {
-    let mode = OutputMode::set_quiet(quiet);
-
-    // 1. Debug Block (The Wrapper legacy - always helpful for devs)
-    #[cfg(debug_assertions)]
-    if !quiet {
-        eprintln!("--- DEBUG: Running Action {:?} ---", action);
-    }
-
-    match action {
-        AliasAction::Clear => {
-            qprintln!(quiet, "🧹 Clearing RAM macros...");
-            let report = P::purge_ram_macros()?; // Success from either lib
-
-            if !report.cleared.is_empty() {
-                qprintln!(quiet, "✨ Removed {} aliases.", report.cleared.len());
-            }
-            if !report.failed.is_empty() {
-                eprintln!("⚠️ Failed to clear {} aliases (protected by host).", report.failed.len());
-            }
-            if report.cleared.is_empty() && report.failed.is_empty() {
-                qprintln!(quiet, "ℹ️ RAM was already empty.");
-            }
-        }
-
-        AliasAction::Reload => {
-            qprintln!(quiet, "🔄 Syncing RAM with {}...", path.display());
-            P::reload_full(path, quiet)?;
-        }
-
-        AliasAction::ShowAll => {
-            P::alias_show_all();
-        }
-
-        AliasAction::Query(term) => {
-            let _ = print_results(P::query_alias(&term, mode));
-        }
-
-        AliasAction::Set(opts) => {
-            // Both libs now handle the logic internally (Disk vs RAM)
-            P::set_alias(opts, path, quiet)?;
-        }
-
-        AliasAction::Edit(custom_editor) => {
-            open_editor(path, custom_editor, quiet)?;
-            P::reload_full(path, quiet)?; // Using aligned 2-arg signature
-            qprintln!(quiet, "✨ Aliases reloaded after edit.");
-        }
-
-        AliasAction::Which => {
-            // Each lib provides its own specific diagnostics report
-            P::run_diagnostics(path);
-        }
-
-        AliasAction::Setup => {
-            qprintln!(quiet, "🛠️  Setting up Windows AutoRun hook...");
-            P::install_autorun(quiet)?;
-        }
-
-        AliasAction::Help => print_help(HelpMode::Full, Some(path)),
-
-        AliasAction::Invalid => {
-            eprintln!("❌ Invalid command.");
-            print_help(HelpMode::Short, Some(path));
-        }
-    }
-
-    Ok(())
-}
-
-impl AliasEntry {
-    pub fn parse(raw: &str) -> Option<Self> {
-        raw.split_once('=').and_then(|(n, v)| {
-            let name = n.trim();
-            // --- THE INJECTION ---
-            if is_valid_name(name) {
-                Some(Self {
-                    name: name.to_string(),
-                    value: v.to_string(),
-                })
-            } else {
-                None // Skip garbage lines in the file
-            }
-        })
+impl ShowFeature {
+    pub fn is_on(&self) -> bool {
+        matches!(self, Self::On)
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct AliasEntryMesh {
-    pub name: String,
-    pub os_value: Option<String>,   // None = Missing, Some("") = Empty Value
-    pub file_value: Option<String>,
-}
-
-impl AliasEntryMesh {
-    // This helper specifically identifies your "cdx= beast
-    pub fn is_empty_definition(&self) -> bool {
-        match &self.os_value {
-            Some(val) => val.is_empty(),
-            None => false,
-        }
-    }
-}
+pub type ShowIcons = ShowFeature;
+pub type ShowTips  = ShowFeature;
 
 #[derive(Debug, PartialEq, Clone)]
 pub struct SetOptions {
     pub name: String,
     pub value: String,
-    pub volatile: bool,   // If true, skip Disk Strike (The "Suppress Disk" override)
-    pub force_case: bool, // If true, skip .to_lowercase() (The "Injection" override)
+    pub volatile: bool,
+    pub force_case: bool,
 }
 
-impl SetOptions {
-    pub fn new(name: &str, value: &str) -> Self {
-        Self {
-            name: name.to_string(),
-            value: value.to_string(),
-            volatile: false,
-            force_case: false,
-        }
-    }
-}
-
-
+#[derive(Debug, Clone, Default)]
 pub struct PurgeReport {
     pub cleared: Vec<String>,
-    pub failed: Vec<(String, u32)>, // Name and the Win32 Error Code
+    pub failed: Vec<(String, u32)>,
 }
-
 impl PurgeReport {
     pub fn is_fully_clean(&self) -> bool {
         self.failed.is_empty()
     }
 }
 
-// --- Logic Dispatcher ---
+// alias_lib/src/diagnostics.rs (or inside lib.rs)
 
-pub fn resolve_command(cmd: &str) -> Option<AliasAction> {
-    match cmd {
-        "--help" | "-h" | "/?" => Some(AliasAction::Help),
-        "--which"  => Some(AliasAction::Which),
-        "--reload" => Some(AliasAction::Reload),
-        "--clear"  => Some(AliasAction::Clear),
-        "--setup"  => Some(AliasAction::Setup),
-        _ => None,
+pub struct DiagnosticReport {
+    pub binary_path: Option<PathBuf>,
+    pub resolved_path: PathBuf,
+    pub env_file: String,
+    pub env_opts: String,
+    pub file_exists: bool,
+    pub is_readonly: bool,
+    pub drive_responsive: bool,
+    pub registry_status: RegistryStatus,
+    pub api_status: Option<String>, // "CONNECTED" vs "SPAWNER"
+}
+
+pub enum RegistryStatus {
+    Synced,
+    Mismatch(String),
+    NotFound,
+}
+
+#[derive(Debug, Clone)]
+pub struct AliasEntryMesh {
+    pub name: String,
+    pub os_value: Option<String>,
+    pub file_value: Option<String>,
+}
+impl AliasEntryMesh {
+    pub fn is_empty_definition(&self) -> bool {
+        self.os_value.is_none() && self.file_value.is_none()
     }
 }
 
-/// The final word: No spaces anywhere, must be alphanumeric start.
+pub trait AliasProvider {
+    // --- 1. THE ATOMIC "HANDS" (Platform must implement these) ---
+    fn raw_set_macro(name: &str, value: Option<&str>) -> io::Result<bool>;
+    fn raw_reload_from_file(path: &Path) -> io::Result<()>;
+    fn get_all_aliases() -> Vec<(String, String)>;
+    fn write_autorun_registry(cmd: &str, v: Verbosity) -> io::Result<()>;
+    fn read_autorun_registry() -> String;
+
+    // --- 2. THE CENTRALIZED LOGIC (Default implementations) ---
+
+    /// Formerly logic_purge_ram
+    fn purge_ram_macros() -> io::Result<PurgeReport> {
+        let mut report = PurgeReport::default();
+        // Use Self:: to call the atomic hands
+        let before = Self::get_all_aliases();
+
+        for (name, _) in &before {
+            // We use raw_set_macro with None to delete
+            if Self::raw_set_macro(name, None)? {
+                report.cleared.push(name.clone());
+            }
+        }
+
+        let after = Self::get_all_aliases();
+        for (name, _) in after {
+            if let Some(pos) = report.cleared.iter().position(|x| x == &name) {
+                report.cleared.remove(pos);
+                report.failed.push((name, 0));
+            }
+        }
+        Ok(report)
+    }
+
+    /// Formerly execute_full_reload
+    fn reload_full(path: &Path, verbosity: Verbosity) -> io::Result<()> {
+        // Call our own purge logic
+        Self::purge_ram_macros()?;
+
+        let content = std::fs::read_to_string(path)?;
+        let count = content.lines()
+            .filter(|l| !l.trim().is_empty() && !l.trim().starts_with(';'))
+            .count();
+
+        // Call the engine
+        Self::raw_reload_from_file(path)?;
+
+        say!(verbosity, AliasIcon::Success, "Reload: {} macros injected.", count);
+        Ok(())
+    }
+
+    fn install_autorun(verbosity: Verbosity) -> io::Result<()> {
+        let path = get_alias_path().ok_or_else(|| {
+            io::Error::new(io::ErrorKind::NotFound, "No alias file found.")
+        })?;
+
+        let exe_path = std::env::current_exe()?;
+        let our_cmd = format!("\"{}\" --reload --file \"{}\"", exe_path.display(), path.display());
+
+        Self::write_autorun_registry(&our_cmd, verbosity)
+    }
+
+    // These still need implementations or defaults
+    fn query_alias(name: &str, verbosity: Verbosity) -> Vec<String>;
+    fn set_alias(opts: SetOptions, path: &Path, verbosity: Verbosity) -> io::Result<()>;
+    fn run_diagnostics(path: &Path, verbosity: Verbosity);
+    fn alias_show_all(verbosity: Verbosity);
+}
+
+// --- Main Runner ---
+pub fn run<P: AliasProvider>(mut args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
+    // 1. Handle ENV_ALIAS_OPTS injection
+    if let Ok(opts) = env::var(ENV_ALIAS_OPTS) {
+        let extra: Vec<String> = opts.split_whitespace()
+            .map(String::from)
+            .filter(|opt| matches!(opt.as_str(), "--quiet" | "--temp" | "--force"))
+            .collect();
+        args.splice(1..1, extra);
+    }
+
+    // 2. Parse intent (Now handles --file and identifies ShowAll)
+    let (action, mut verbosity, cli_path) = parse_alias_args(&args);
+
+    // 3. Resolve Path: Flag > Env > Default
+    let path = cli_path
+        .or_else(get_alias_path)
+            .ok_or(verbosity.icon_format(AliasIcon::Fail, "Error: No alias file found. Set ALIAS_FILE or use --file"))?;
+
+    // 4. Special Case: If it's just "alias" (ShowAll), override verbosity to be clean
+    // This replaces your 'if args.len() == 1' logic
+    if args.len() == 1 && action == AliasAction::ShowAll {
+        verbosity = voice!(Normal, ShowIcons::Off, ShowTips::Off);
+    }
+
+    // 5. Dispatch
+    dispatch::<P>(action, verbosity, &path)
+}
+
+pub fn dispatch<P: AliasProvider>(
+    action: AliasAction,
+    verbosity: Verbosity,
+    path: &Path
+) -> Result<(), Box<dyn std::error::Error>> {
+    match action {
+        AliasAction::Clear => {
+            whisper!(verbosity, "Purging RAM macros...");
+            let report = P::purge_ram_macros()?;
+            if !report.cleared.is_empty() {
+                say!(verbosity, AliasIcon::Info,"Removed {} aliases.", report.cleared.len());
+            }
+        }
+        AliasAction::Reload => P::reload_full(path, verbosity)?,
+        AliasAction::ShowAll => P::alias_show_all(verbosity),
+        AliasAction::Query(term) => {
+            for line in P::query_alias(&term, verbosity) {
+                verbosity.whisper(&line);
+            }
+        }
+        AliasAction::Set(opts) => P::set_alias(opts, path, verbosity)?, // Fixed Missing Arm
+        AliasAction::Edit(custom_editor) => {
+            open_editor(path, custom_editor, verbosity)?;
+            P::reload_full(path, verbosity)?;
+        }
+        AliasAction::Which => P::run_diagnostics(path, verbosity),
+        AliasAction::Setup => P::install_autorun(verbosity)?,
+        AliasAction::Help => print_help(verbosity, HelpMode::Full, Some(path)),
+        AliasAction::Invalid => {
+            verbosity.scream("Invalid command.");
+            print_help(verbosity, HelpMode::Short, Some(path));
+        }
+    }
+    Ok(())
+}
+
+// --- Audit & Mesh Logic ---
+
+pub fn mesh_logic(os_list: Vec<(String, String)>, file_list: Vec<(String, String)>) -> Vec<AliasEntryMesh> {
+    let mut mesh_list: Vec<AliasEntryMesh> = os_list
+        .into_iter()
+        .map(|(n, v)| AliasEntryMesh {
+            name: n,
+            os_value: Some(v),
+            file_value: None,
+        })
+        .collect();
+
+    for (f_name, f_val) in file_list {
+        if let Some(existing) = mesh_list.iter_mut().find(|e| e.name == f_name) {
+            existing.file_value = Some(f_val);
+        } else {
+            mesh_list.push(AliasEntryMesh {
+                name: f_name,
+                os_value: None,
+                file_value: Some(f_val),
+            });
+        }
+    }
+    mesh_list
+}
+
+pub fn perform_audit(os_pairs: Vec<(String, String)>, verbosity: Verbosity) {
+    let file_pairs = dump_alias_file();
+    let mesh = mesh_logic(os_pairs, file_pairs);
+    display_audit(&mesh, verbosity);
+}
+
+pub fn display_audit(mesh_list: &[AliasEntryMesh], verbosity: Verbosity) {
+    let max_len = mesh_list.iter()
+        .map(|e| {
+            let val = e.os_value.as_deref().unwrap_or("<MISSING>");
+            format!("{}={}", e.name, val).len()
+        })
+        .max().unwrap_or(20);
+
+    for entry in mesh_list {
+        let os_val = entry.os_value.as_deref().unwrap_or("");
+        verbosity.align(
+            &entry.name,
+            os_val,
+            max_len + 5,
+            (entry.os_value.is_some(), false, entry.file_value.is_some())
+        );
+
+        if let (Some(os), Some(fi)) = (&entry.os_value, &entry.file_value) {
+            if os != fi {
+                verbosity.shout(&format!("Desync for {}: File has '{}'", entry.name, fi));
+            }
+        }
+    }
+}
+
+pub fn perform_triple_audit(
+    verbosity: Verbosity, // Pass the baton in
+    win32_pairs: Vec<(String, String)>,
+    mut wrap_pairs: Vec<(String, String)>,
+    mut file_pairs: Vec<(String, String)>
+) {
+    let mut desync_detected = false;
+
+    // 1. Calculate the max width for the names
+    let max_len = win32_pairs.iter()
+        .map(|(n, v)| format!("{}={}", n, v).len())
+        .max()
+        .unwrap_or(35);
+
+    say!(verbosity, AliasIcon::Info, "Triple Audit [W=Win32, D=Doskey, F=File]");
+
+    // 2. Primary Loop: Win32 is the source of truth
+    for (name, w_val) in win32_pairs {
+        let d_idx = wrap_pairs.iter().position(|(n, _)| n == &name);
+        let f_idx = file_pairs.iter().position(|(n, _)| n == &name);
+
+        let d_val = d_idx.map(|i| wrap_pairs.remove(i).1);
+        let f_val = f_idx.map(|i| file_pairs.remove(i).1);
+
+        // Use your align method! (Win32 is always true here)
+        verbosity.align(&name, &w_val, max_len + 5, (true, d_val.is_some(), f_val.is_some()));
+
+        // Discrepancy Detection using the friendly macros
+        if let Some(dv) = &d_val {
+            if &w_val != dv {
+                shout!(verbosity, &format!("VALUE DESYNC: Doskey wrapper sees \"{}\"", dv));
+                desync_detected = true;
+            }
+        }
+        if let Some(fv) = &f_val {
+            if &w_val != fv {
+                scream!(verbosity, &format!("FILE MISMATCH: File expects \"{}\"", fv));
+                desync_detected = true;
+            }
+        }
+    }
+
+    // 3. Leftovers in Doskey (Phantom)
+    for (name, d_val) in wrap_pairs {
+        let f_idx = file_pairs.iter().position(|(n, _)| n == &name);
+        let f_val = f_idx.map(|i| file_pairs.remove(i).1);
+
+        verbosity.align(&name, &d_val, max_len + 5, (false, true, f_val.is_some()));
+        shout!(verbosity, "PHANTOM: In Doskey, not Win32.");
+        desync_detected = true;
+    }
+
+    // 4. Leftovers in File (Pending)
+    for (name, f_val) in file_pairs {
+        verbosity.align(&name, &f_val, max_len + 5, (false, false, true));
+        shout!(verbosity, "PENDING: In File, not OS.");
+        desync_detected = true;
+    }
+
+    // 5. The Sovereign Reminder
+    if desync_detected {
+        say!(verbosity, AliasIcon::Info, "Tip: Out of sync? Run `alias --reload` to align RAM with your config file.");
+    }
+}
+
+// --- Utility Functions ---
+
 pub fn is_valid_name(name: &str) -> bool {
-    if name.is_empty() { return false; }
-
-    // 1. Reject if it contains any internal spaces
-    if name.contains(' ') { return false; }
-
-    // 2. Reject if there are leading/trailing spaces (must be exact)
-    if name.trim() != name { return false; }
-
+    if name.is_empty() || name.contains(' ') || name.trim() != name { return false; }
     let first = name.chars().next().unwrap();
-
-    // 3. Enforce: Must start with Letter or Underscore (Blocks 0-9 and Symbols)
     first.is_alphabetic() || first == '_'
 }
 
-// The initial guard: Must be alphanumeric start.
-// (Allows spaces later in the string for the "Beast" value).
 pub fn is_valid_name_loose(name: &str) -> bool {
     if name.is_empty() { return false; }
     let first = name.chars().next().unwrap();
-
-    // Allows A-Z, a-z, 0-9 AND international letters (like ñ or λ)
-    // but REJECTS weird Unicode symbols/numbers that aren't plain digits.
     first.is_alphabetic() || first.is_ascii_digit()
 }
 
-pub fn parse_alias_args(args: &[String]) -> (AliasAction, bool) {
-    // 1. Detect Flags (Global/Pre-command)
-    let quiet = args.iter().any(|a| matches!(a.to_lowercase().as_str(), "--quiet"));
-    let volatile = args.iter().any(|a| a.to_lowercase() == "--temp");
-    let force_case = args.iter().any(|a| matches!(a.to_lowercase().as_str(), "--force"));
-
-    // 2. Filter out ALL flags so only "commands" and "content" remain
-    let f_args: Vec<String> = args.iter()
-        .filter(|a| {
-            let low = a.to_lowercase();
-            !matches!(low.as_str(), "--quiet" |"--temp" | "--force")
-        })
-        .cloned()
-        .collect();
-
-    // 3. Minimum args check (just the exe name left)
-    if f_args.len() < 2 {
-        return (AliasAction::ShowAll, quiet);
-    }
-
-    // Use the first non-flag argument to determine intent
-    let first = f_args[1].to_lowercase();
-
-    // 4. Resolve Keywords (clear, reload, etc.)
-    if let Some(action) = resolve_command(&first) {
-        return (action, quiet);
-    }
-
-    // 5. Handle Editor override (e.g., alias --edalias=nano)
-    if first.starts_with("--edalias") {
-        let ed = first.split_once('=')
-            .map(|(_, e)| e.trim().to_string())
-            .filter(|s| !s.is_empty());
-        return (AliasAction::Edit(ed), quiet);
-    }
-
-    // 6. Safety: If it's not a known command/flag but starts with '-', it's garbage.
-    if !is_valid_name_loose(&first) {
-        return (AliasAction::Invalid, quiet);
-    }
-
-    // 7. Split Logic: Set (name=val) vs Query (name)
-    // We join the REMAINING filtered args to allow spaces in values
-    let input = f_args[1..].join(" ");
-    let delim = if input.contains('=') { '=' } else { ' ' };
-
-    if let Some((n, v)) = input.split_once(delim) {
-        let name = n.trim();
-        if !is_valid_name(name) {
-            return (AliasAction::Invalid, quiet);
-        }
-        if name.is_empty() {
-            (AliasAction::Invalid, quiet)
-        } else {
-            (AliasAction::Set(SetOptions {
-                name: name.to_string(),
-                value: v.trim().to_string(),
-                volatile,    // <--- WIRED UP
-                force_case,  // <--- WIRED UP
-            }), quiet)
-        }
-    } else if f_args.len() == 2 {
-        (AliasAction::Query(f_args[1].clone()), quiet)
-    } else {
-        (AliasAction::Invalid, quiet)
-    }
-}
-
-// --- Path & File Persistence ---
-
 pub fn get_alias_path() -> Option<PathBuf> {
-    // Check override first
     if let Ok(val) = env::var(ENV_ALIAS_FILE) {
         let p = PathBuf::from(val);
         return Some(if p.is_dir() { p.join(DEFAULT_ALIAS_FILENAME) } else { p });
     }
-
-    // Default search
     ["APPDATA", "USERPROFILE"].iter()
-        .filter_map(|var: &&str| {
-            let base = env::var(var).ok().map(PathBuf::from)?;
-            let sub = if *var == "APPDATA" { "alias_tool" } else { "" };
-            Some(base.join(sub).join(DEFAULT_ALIAS_FILENAME))
-        })
-        .find(|p| is_path_healthy(p))
+        .filter_map(|var| env::var(var).ok().map(PathBuf::from))
+        .map(|base| base.join("alias_tool").join(DEFAULT_ALIAS_FILENAME))
+        .find(|p| p.parent().map_or(false, |parent| parent.exists()))
 }
 
-pub fn is_path_healthy(p: &Path) -> bool {
-    if !p.exists() {
-        return p.parent().map_or(false, |parent| parent.exists() && parent.is_dir());
-    }
-    fs::metadata(p).map(|m| !m.permissions().readonly()).unwrap_or(false)
-}
-
-pub fn parse_macro_file(path: &Path) -> Vec<(String, String)> {
+pub fn dump_alias_file() -> Vec<(String, String)> {
+    let Some(path) = get_alias_path() else { return vec![]; };
     fs::read_to_string(path).unwrap_or_default()
         .lines()
-        .map(|l| l.trim())
-        .filter(|l| !l.is_empty())
-        .filter_map(|l| l.split_once('='))
-        .filter(|(k, v)| is_valid_name(k.trim()) && !v.trim().is_empty())
-        .map(|(k, v)| (k.trim().to_string(), v.trim().to_string()))
+        .filter(|line| !line.trim().is_empty() && !line.starts_with(';'))
+        .filter_map(|line| line.split_once('=').map(|(n, v)| (n.to_string(), v.to_string())))
         .collect()
+}
+
+pub fn open_editor(path: &Path, override_ed: Option<String>, verbosity: Verbosity) -> io::Result<()> {
+    let ed = override_ed.or_else(|| env::var(ENV_VISUAL).ok()).or_else(|| env::var(ENV_EDITOR).ok())
+        .unwrap_or_else(|| FALLBACK_EDITOR.to_string());
+
+    verbosity.say(&format!("Launching {}...", ed));
+    if Command::new(&ed).arg(path).status().is_err() {
+        Command::new(FALLBACK_EDITOR).arg(path).status()?;
+    }
+    Ok(())
+}
+
+pub fn parse_alias_args(args: &[String]) -> (AliasAction, Verbosity, Option<PathBuf>) {
+    let mut voice = Verbosity::normal();
+    let mut volatile = false;
+    let mut force_case = false;
+    let mut custom_path: Option<PathBuf> = None;
+    let mut pivot_index = args.len();
+    let mut skip_next = false;
+
+    // --- STEP 1: FLAG CONSUMPTION ---
+    for (i, arg) in args.iter().enumerate().skip(1) {
+        if skip_next {
+            skip_next = false;
+            continue;
+        }
+
+        let low_arg = arg.to_lowercase();
+        if low_arg.starts_with("--") {
+            match low_arg.as_str() {
+                "--quiet"    => { voice.level = VerbosityLevel::Silent; voice.decorations = false; }
+                "--temp"     => volatile = true,
+                "--force"    => force_case = true,
+                "--tips"     => voice.show_tips = true,
+                "--no-tips"  => voice.show_tips = false,
+                "--icons"    => voice.decorations = true,
+                "--no-icons" => voice.decorations = false,
+                "--file"     => {
+                    if let Some(path_str) = args.get(i + 1) {
+                        custom_path = Some(PathBuf::from(path_str));
+                        skip_next = true;
+                    }
+                }
+                _ => { pivot_index = i; break; }
+            }
+        } else {
+            pivot_index = i;
+            break;
+        }
+    }
+
+    // --- STEP 2: PAYLOAD EXTRACTION ---
+    let f_args: Vec<String> = if pivot_index < args.len() {
+        args[pivot_index..].to_vec()
+    } else {
+        Vec::new()
+    };
+
+    // --- STEP 3: ACTION MAPPING ---
+    if f_args.is_empty() {
+        return (AliasAction::ShowAll, voice, custom_path);
+    }
+
+    let first = f_args[0].to_lowercase();
+
+    if first.starts_with("--edalias") || first.starts_with("--edaliases") {
+        let editor = if let Some((_, ed)) = first.split_once('=') {
+            Some(ed.to_string())
+        } else {
+            None
+        };
+        return (AliasAction::Edit(editor), voice, custom_path);
+    }
+
+    if let Some(action) = resolve_command(&first) {
+        return (action, voice, custom_path);
+    }
+
+    if !is_valid_name_loose(&first) {
+        return (AliasAction::Invalid, voice, custom_path);
+    }
+
+    // --- STEP 4: SET vs QUERY SPLIT ---
+    let input = f_args.join(" ");
+    let delim = if input.contains('=') { '=' } else { ' ' };
+
+    if let Some((n, v)) = input.split_once(delim) {
+        (AliasAction::Set(SetOptions {
+            name: n.trim().to_string(),
+            value: v.trim().to_string(),
+            volatile,
+            force_case,
+        }), voice, custom_path)
+    } else {
+        (AliasAction::Query(f_args[0].clone()), voice, custom_path)
+    }
 }
 
 pub fn update_disk_file(name: &str, value: &str, path: &Path) -> io::Result<()> {
@@ -413,59 +753,31 @@ pub fn update_disk_file(name: &str, value: &str, path: &Path) -> io::Result<()> 
     Ok(())
 }
 
-// --- OS Interop ---
-
-pub fn open_editor(path: &Path, override_ed: Option<String>, quiet: bool) -> io::Result<()> {
-    let ed = override_ed.or_else(|| env::var(ENV_VISUAL).ok()).or_else(|| env::var(ENV_EDITOR).ok())
-        .unwrap_or_else(|| FALLBACK_EDITOR.to_string());
-
-    qprintln!(quiet, "🚀 Launching {}...", ed);
-    if Command::new(&ed).arg(path).status().is_err() {
-        Command::new(FALLBACK_EDITOR).arg(path).status()?;
-    }
-    Ok(())
+pub fn parse_macro_file(path: &Path) -> Vec<(String, String)> {
+    fs::read_to_string(path).unwrap_or_default()
+        .lines()
+        .map(|l| l.trim())
+        .filter(|l| !l.is_empty())
+        .filter_map(|l| l.split_once('='))
+        .filter(|(k, v)| is_valid_name(k.trim()) && !v.trim().is_empty())
+        .map(|(k, v)| (k.trim().to_string(), v.trim().to_string()))
+        .collect()
 }
 
-pub fn print_help(mode: HelpMode, path: Option<&std::path::Path>) {
-    // Shared Header
-    println!("{} (Rust) - High-speed alias management", "\x1b[1;36mALIAS\x1b[0m");
 
-    if let HelpMode::Full = mode {
-        println!(r#"
-  {}
-    alias                       List active macros
-    alias <name>                Search for a specific macro
-    alias <name>=[value]        Set or delete (if empty) a macro
-    alias <name> [value]        Set a macro (alternate syntax)
+pub fn resolve_command(cmd: &str) -> Option<AliasAction> {
+    match cmd {
+        "--clear"  => Some(AliasAction::Clear),
+        "--reload" => Some(AliasAction::Reload),
+        "--setup"  => Some(AliasAction::Setup),
+        "--which"  => Some(AliasAction::Which),
 
-  {}
-    -h, --help                  Show this help menu
-    -q, --quiet                 Suppress success output
-    -r, --reload                Force reload from .doskey file
-    -s, --setup                 Install AutoRun registry hook
-    -w, --which                 Display the path to the current alias file
-    -e, --edalias[=EDITOR]      Open alias file (Default: notepad)
-
-  {}
-    ALIAS_FILE                  Path to your .doskey file
-    ALIAS_OPTS                  Default flags (e.g. "--quiet")"#,
-                 "\x1b[1;33mUSAGE:\x1b[0m",
-                 "\x1b[1;33mFLAGS:\x1b[0m",
-                 "\x1b[1;33mENVIRONMENT:\x1b[0m"
-        );
+        "--help" | "-h" | "/?" => Some(AliasAction::Help),
+        _ => None,
     }
-
-    // The logic that uses the path you're passing in
-    if let Some(p) = path {
-        println!("\n  \x1b[1;32mCURRENT FILE:\x1b[0m");
-        println!("    {}", p.display());
-    } else {
-        println!("\n  \x1b[1;31mCURRENT FILE:\x1b[0m\n    None (Use ALIAS_FILE to set)");
-    }
-    println!(); // Trailing newline for cleanliness
 }
 
-pub fn query_alias_file(name: &str, path: &Path, mode: OutputMode) -> Vec<String> {
+pub fn query_alias_file(name: &str, path: &Path, mode: Verbosity) -> Vec<String> {
     let mut results = Vec::new();
     let search = format!("{}=", name.to_lowercase());
 
@@ -478,7 +790,7 @@ pub fn query_alias_file(name: &str, path: &Path, mode: OutputMode) -> Vec<String
 
     if let Some(line) = found {
         results.push(line.to_string());
-    } else if !mode.is_quiet() {
+    } else if !mode.is_silent() {
         // Only push the "Not Known" message if we aren't in Silent/DataOnly mode
         results.push(format!("{} is not a known alias in the config file.", name));
     }
@@ -486,206 +798,172 @@ pub fn query_alias_file(name: &str, path: &Path, mode: OutputMode) -> Vec<String
     results
 }
 
-pub fn dump_alias_file() -> Vec<(String, String)> {
-    // 1. Get the path using your fallback logic
-    let Some(path) = get_alias_path() else {
-        return vec![]; // No file found, file half of mesh will be empty
-    };
-
-    // 2. Read and parse into (Name, Value) pairs
-    let content = std::fs::read_to_string(path).unwrap_or_default();
-
-    content.lines()
-        .filter(|line| !line.trim().is_empty() && !line.starts_with(';'))
-        .filter_map(|line| {
-            // Split once at '=' to preserve quotes/the "Beast"
-            line.split_once('=').map(|(n, v)| (n.to_string(), v.to_string()))
-        })
-        .collect()
+pub fn is_path_healthy(path: &Path) -> bool {
+    path.exists() && path.is_file()
 }
 
-pub fn inject_env_options(args: &mut Vec<String>) {
-    // 1. Check for ENV_ALIAS_OPTS (e.g., "--quiet")
-    if let Ok(env_opts) = env::var(ENV_ALIAS_OPTS) {
-        // Only inject if the user hasn't already provided options
-        // Or simply append them to the start so CLI overrides can still happen
-        for opt in env_opts.split_whitespace() {
-            if !args.contains(&opt.to_string()) {
-                // Insert after the executable name (index 0)
-                args.insert(1, opt.to_string());
-            }
-        }
-    }
-
-    // 2. Check for ENV_ALIAS_FILE (The DB location)
-    if let Ok(env_file) = env::var(ENV_ALIAS_FILE) {
-        // If the user didn't specify --file manually in the CLI
-        if !args.contains(&"--file".to_string()) && !args.contains(&"-f".to_string()) {
-            args.push("--file".to_string());
-            args.push(env_file);
-        }
-    }
-}
-
-pub fn calculate_new_file_state(current_content: &str, name: &str, value: &str) -> String {
-    let search_target = format!("{}=", name.to_lowercase());
-
-    // Filter out the old line if it exists
-    let mut lines: Vec<String> = current_content
+pub fn calculate_new_file_state(original_content: &str, name: &str, value: &str) -> String {
+    let mut lines: Vec<String> = original_content
         .lines()
-        .filter(|line| !line.to_lowercase().starts_with(&search_target))
-        .map(|s| s.to_string())
+        .map(|l| l.to_string())
         .collect();
 
-    // Add the new line if it's not a deletion (empty value)
-    if !value.is_empty() {
+    let search = format!("{}=", name.to_lowercase());
+    let mut found = false;
+
+    for line in lines.iter_mut() {
+        if line.to_lowercase().starts_with(&search) {
+            if value.is_empty() {
+                line.clear(); // Mark for removal
+            } else {
+                *line = format!("{}={}", name, value);
+            }
+            found = true;
+            break;
+        }
+    }
+
+    if !found && !value.is_empty() {
         lines.push(format!("{}={}", name, value));
     }
 
-    let mut result = lines.join("\n");
-    if !result.is_empty() {
-        result.push('\n');
-    }
-    result
+    lines.into_iter()
+        .filter(|l| !l.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
-pub fn mesh_logic(os_list: Vec<(String, String)>, file_list: Vec<(String, String)>) -> Vec<AliasEntryMesh> {
-    let mut mesh_list: Vec<AliasEntryMesh> = os_list
-        .into_iter()
-        .map(|(n, v)| AliasEntryMesh {
-            name: n,
-            os_value: Some(v), // Even if v is "", it is Some("")
-            file_value: None,
-        })
-        .collect();
+// alias_lib/src/lib.rs
 
-    for (f_name, f_val) in file_list {
-        if let Some(existing) = mesh_list.iter_mut().find(|e| e.name == f_name) {
-            existing.file_value = Some(f_val);
-        } else {
-            mesh_list.push(AliasEntryMesh {
-                name: f_name,
-                os_value: None,
-                file_value: Some(f_val),
-            });
-        }
+pub fn render_diagnostics(report: DiagnosticReport, verbosity: Verbosity) {
+    whisper!(verbosity, AliasIcon::Tools, "--- Alias Tool Diagnostics ---");
+
+    if let Some(p) = report.binary_path {
+        say!(verbosity, AliasIcon::Disk, "Binary Loc:    {}", p.display());
     }
-    mesh_list
-}
 
-pub fn display_audit(mesh_list: &[AliasEntryMesh]) {
-    // 1. Calculate max length for the "Far Right" alignment
-    let max_len = mesh_list.iter()
-        .map(|e| {
-            let val = e.os_value.as_deref().unwrap_or("<MISSING>");
-            format!("{}={}", e.name, val).len()
-        })
-        .max()
-        .unwrap_or(20);
+    say!(verbosity, AliasIcon::File, "File Var:       {} = \"{}\"", ENV_ALIAS_FILE, report.env_file);
+    say!(verbosity, AliasIcon::Environment, "Env Var:        {} = \"{}\"", ENV_ALIAS_OPTS, report.env_opts);
+    say!(verbosity, AliasIcon::Path, "Resolved Path: {}", report.resolved_path.display());
 
-    // 2. Iterate and print with "The Beast" detection
-    for entry in mesh_list {
-        let display_val = match &entry.os_value {
-            Some(v) if v.is_empty() => "<EMPTY>",
-            Some(v) => v,
-            None => "<NOT IN OS>",
-        };
+    // Status logic centered in one place
+    let file_status = if !report.file_exists {
+        text!(verbosity, AliasIcon::Fail, "MISSING OR INACCESSIBLE")
+    } else if report.is_readonly {
+        text!(verbosity, AliasIcon::Alert, "EXISTS (READ-ONLY)")
+    } else {
+        text!(verbosity, AliasIcon::Ok, "EXISTS (WRITABLE)")
+    };
+    say!(verbosity, AliasIcon::Disk, "File Status:   {}", file_status);
 
-        let line = format!("{}={}", entry.name, display_val);
+    if report.drive_responsive {
+        say!(verbosity, AliasIcon::Ok, "Drive Status:  RESPONSIVE");
+    }
 
-        let o = if entry.os_value.is_some() { "O" } else { " " };
-        let f = if entry.file_value.is_some() { "F" } else { " " };
+    say!(verbosity, AliasIcon::None, " ");
+    say!(verbosity, AliasIcon::None, "Registry Check (AutoRun):");
+    match report.registry_status {
+        RegistryStatus::Synced => say!(verbosity, AliasIcon::Ok, "  Status:      SYNCED"),
+        RegistryStatus::Mismatch(val) => say!(verbosity, AliasIcon::Alert, "  Status:      MISMATCH (Found: {})", val),
+        RegistryStatus::NotFound => say!(verbosity, AliasIcon::Fail, "  Status:      NOT FOUND"),
+    }
 
-        // Determine if we have a mismatch (The Beast or just different values)
-        let mut alert = "";
-        if let (Some(os), Some(fi)) = (&entry.os_value, &entry.file_value) {
-            if os != fi {
-                alert = " !! MISMATCH !!";
-                if os.is_empty() { alert = " !! GHOST EMPTY !!"; }
-            }
-        }
-
-        // The "Far Right" Print: Pad to max_len + 5
-        println!("{:width$} [{}{}] {}", line, o, f, alert, width = max_len + 5);
+    if let Some(api) = report.api_status {
+        say!(verbosity, AliasIcon::Say, "Console Link:  {}", api);
     }
 }
 
-pub fn perform_audit(os_pairs: Vec<(String, String)>) {
-    // 1. Get the File data using the healthy path logic
-    let file_pairs = dump_alias_file();
-
-    // 2. Mesh them
-    let mesh = mesh_logic(os_pairs, file_pairs);
-
-    // 3. Display with the Far-Right alignment
-    display_audit(&mesh);
+// In alias_lib/src/io_utils.rs or similar
+pub fn is_drive_responsive(path: &Path) -> bool {
+    // Attempt a tiny 1-byte read to verify the handle is actually alive
+    std::fs::File::open(path).and_then(|mut f| {
+        let mut buf = [0; 1];
+        f.read(&mut buf)
+    }).is_ok()
 }
 
-pub fn perform_triple_audit(
-    win32_pairs: Vec<(String, String)>,
-    mut wrap_pairs: Vec<(String, String)>,
-    mut file_pairs: Vec<(String, String)>
-) {
-    let mut desync_detected = false;
-    let max_len = win32_pairs.iter()
-        .map(|(n, v)| format!("{}={}", n, v).len())
-        .max()
-        .unwrap_or(35);
+pub fn perform_autorun_install<P: AliasProvider>(
+    // provider: &P, <--- REMOVE THIS
+    verbosity: Verbosity
+) -> io::Result<()> {
+    let path = get_alias_path().ok_or_else(|| {
+        io::Error::new(io::ErrorKind::NotFound, "No alias file found. Set ALIAS_FILE.")
+    })?;
 
-    println!("--- 🔍 Triple Audit [W=Win32, D=Doskey, F=File] ---");
+    let exe_path = std::env::current_exe()?;
+    let our_cmd = format!("\"{}\" --reload --file \"{}\"", exe_path.display(), path.display());
 
-    // 1. Primary Loop: Win32 is the source of truth for "What is Active"
-    for (name, w_val) in win32_pairs {
-        let d_idx = wrap_pairs.iter().position(|(n, _)| n == &name);
-        let f_idx = file_pairs.iter().position(|(n, _)| n == &name);
+    // This is now a static call to the type P
+    P::write_autorun_registry(&our_cmd, verbosity)
+}
 
-        let d_val = d_idx.map(|i| wrap_pairs.remove(i).1);
-        let f_val = f_idx.map(|i| file_pairs.remove(i).1);
 
-        let icons = format!("[W{}{}]",
-                            if d_val.is_some() { "D" } else { " " },
-                            if f_val.is_some() { "F" } else { " " }
-        );
+fn get_random_tip() -> &'static str {
+    let tips = [
+        "Tired of Notepad? Set 'EDITOR=code' in your env to use VS Code for --edalias.",
+        "Use --temp to keep an alias in RAM only—it vanishes when you close the window.",
+        "The Audit (alias --which) checks if your File, and the system are in sync.",
+        "You can use $* in your values! e.g., 'alias g=git $*' passes all args to git.",
+        "Hate icons? Set 'ALIAS_OPTS=--quiet' in your system environment to hide them.",
+        "Run 'alias --reload' to force-sync your current session with your config file.",
+        "alias --setup hooks into the registry so your macros 'just work' in every window.",
+        "Type 'alias <name>' (without an '=') to see what a specific macro does.",
+    ];
 
-        let display_val = if w_val.is_empty() { "<EMPTY>" } else { &w_val };
-        println!("{:width$} {}", format!("{}={}", name, display_val), icons, width = max_len + 5);
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let nanos = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
+    tips[(nanos % tips.len() as u128) as usize]
+}
 
-        // Discrepancy Detection
-        if let Some(dv) = &d_val {
-            if &w_val != dv {
-                println!("  ⚠️  VALUE DESYNC: Doskey wrapper sees \"{}\"", dv);
-                desync_detected = true;
-            }
-        }
-        if let Some(fv) = &f_val {
-            if &w_val != fv {
-                println!("  ❌ FILE MISMATCH: File expects \"{}\"", fv);
-                desync_detected = true;
-            }
-        }
+pub fn random_tip_show() -> Option<&'static str> {
+    let seed = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    if seed % 10 == 0 {
+        return Some(get_random_tip());
     }
+    None
+}
 
-    // 2. Leftovers in Doskey (Phantom entries)
-    for (name, d_val) in wrap_pairs {
-        let f_idx = file_pairs.iter().position(|(n, _)| n == &name);
-        let f_val = f_idx.map(|i| file_pairs.remove(i).1);
-        println!("{:<width$} [ D{}] !! PHANTOM (In Doskey, not Win32) !!",
-                 format!("{}={}", name, d_val),
-                 if f_val.is_some() { "F" } else { " " },
-                 width = max_len + 5);
-        desync_detected = true;
-    }
+pub fn print_help(verbosity: Verbosity, mode: HelpMode, path: Option<&Path>) {
+    // 1. Header with Icon
+    shout!(verbosity, AliasIcon::Info, "ALIAS (Rust) - High-speed alias management");
+    say!(verbosity, AliasIcon::None, r#"
+USAGE:
+  alias                       List active macros
+  alias <name>                Search for a specific macro
+  alias <name>=[value]        Set or delete (if empty) a macro
+  alias <name> [value]        Set a macro (alternate syntax)
 
-    // 3. Leftovers in File (Pending entries)
-    for (name, f_val) in file_pairs {
-        println!("{:<width$} [  F] !! PENDING (In File, not OS) !!",
-                 format!("{}={}", name, f_val),
-                 width = max_len + 5);
-        desync_detected = true;
+"#);
+    if let HelpMode::Short = mode {
+        verbosity.tip(random_tip_show());
+        return
     }
+    shout!(verbosity, AliasIcon::None, r#"
+FLAGS:
+  --help                  Show this help menu
+  --quiet                 Suppress success output & icons
+  --file <path>           Specify a custom .doskey file
+  --reload                Force reload from file
+  --setup                 Install AutoRun registry hook
+  --which                 Run diagnostics & Triple Audit
+  --edalias[=EDITOR]      Open alias file in editor
+  --temp                  Set alias in RAM only (volatile)
+  --force                 Bypass case-sensitivity checks
+"#);
 
-    // --- The Reminder ---
-    if desync_detected {
-        println!("\n\x1b[1;33m💡 Tip: Out of sync? Run `alias --reload` to align RAM with your config file.\x1b[0m");
+    // 3. Environment (Keep these separate to use the Constants)
+    shout!(verbosity, AliasIcon::Environment, "ENVIRONMENT:");
+    shout!(verbosity, AliasIcon::None, "  {:<15} Path to your .doskey file", ENV_ALIAS_FILE);
+    shout!(verbosity, AliasIcon::None, "  {:<15} Default flags (e.g. \"--quiet\")", ENV_ALIAS_OPTS);
+
+
+    // 4. Footer Status
+    if let Some(p) = path {
+        shout!(verbosity, "");
+        shout!(verbosity, AliasIcon::File, &format!("CURRENT FILE: {}", p.display()));
+    } else {
+        shout!(verbosity, "");
+        shout!(verbosity, "CURRENT FILE: None (Set ALIAS_FILE to fix)");
     }
+    verbosity.tip(random_tip_show());
 }

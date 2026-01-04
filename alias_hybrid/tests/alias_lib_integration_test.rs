@@ -20,4 +20,3 @@ fn test_local_logic() {
 #[cfg(test)]
 #[path = "../../tests/alias_lib_tests.rs"]
 mod shared_under_win32;
-

@@ -1,254 +1,151 @@
 // alias_wrapper/src/lib.rs
 
-use std::{env, fs, io};
-use std::io::Read;
+use std::{env, io};
 use std::path::Path;
 use std::process::Command;
-
-// 1. Import the constants explicitly
-// 2. Import the macro using the crate name
 use alias_lib::*;
-use alias_lib::qprintln;
 
 pub struct WrapperLibraryInterface;
 
 impl alias_lib::AliasProvider for WrapperLibraryInterface {
-    fn purge_ram_macros() -> io::Result<PurgeReport> {
-        purge_ram_macros()
-    }
-    fn reload_full(path: &Path, quiet: bool) -> io::Result<()> {
-        reload_full(path, quiet)
-    }
-    fn query_alias(name: &str, mode: OutputMode) -> Vec<String> {
-        query_alias(name, mode)
-    }
-    fn set_alias(opts: SetOptions, path: &Path, quiet: bool) -> io::Result<()> {
-        set_alias(opts, path, quiet)
-    }
-    fn run_diagnostics(path: &Path) {
-        run_diagnostics(path)
-    }
-    fn alias_show_all() {
-        alias_show_all()
-    }
-    fn install_autorun(quiet: bool) -> io::Result<()> {
-        install_autorun(quiet)
-    }
-}
+    // --- 1. THE REQUIRED "HANDS" (Atomic Operations) ---
 
-pub fn reload_doskey(path: &Path) -> io::Result<()> {
-    Command::new("doskey")
-        .arg(format!("/macrofile={}", path.display()))
-        .status()
-        .map(|_| ())
-}
-
-// In alias_wrapper/src/lib.rs
-pub fn set_alias(opts: SetOptions, path: &Path, quiet: bool) -> io::Result<()> {
-    let name = if opts.force_case { opts.name.clone() } else { opts.name.to_lowercase() };
-
-    if !opts.volatile {
-        // Use the transactional disk fix from Win32 work
-        alias_lib::update_disk_file(&name, &opts.value, path)?;
-    }
-
-    // By passing name=value as a single argument to Command::arg,
-    // Rust handles the necessary quoting for the Win32 process spawn.
-    let status = std::process::Command::new("doskey")
-        .args(["/exename=cmd.exe", &format!("{}={}", name, opts.value)])
-        .status()?;
-
-    if status.success() {
-        let tag = if opts.volatile { "(volatile)" } else { "(saved)" };
-        qprintln!(quiet, "✨ Wrapper set {}: {}={}", tag, name, opts.value);
-    }
-    Ok(())
-}
-
-/// Perfroms a "Hard Sync": Wipes RAM then loads from disk
-pub fn reload_full(path: &Path, quiet: bool) -> io::Result<()> {
-    // 1. Clear the current session
-    purge_ram_macros()?;
-
-    // 2. Count the macros in the file (assuming 1 macro per line)
-    let content = std::fs::read_to_string(path)?;
-    let count = content.lines()
-        .filter(|l| !l.trim().is_empty() && !l.trim().starts_with(';')) // Ignore empty and comments
-        .count();
-
-    // 3. Execute the Doskey reload
-    let status = Command::new("doskey")
-        .arg(format!("/macrofile={}", path.display()))
-        .status()?;
-
-    if !status.success() {
-        return Err(io::Error::new(io::ErrorKind::Other, "Doskey failed to load file"));
-    }
-
-    // 4. Now 'count' exists!
-    qprintln!(quiet, "✨ Wrapper Reload: {} macros injected.", count);
-    Ok(())
-}
-/// Hooks the tool into the CMD AutoRun registry key
-pub fn install_autorun(quiet: bool) -> io::Result<()> {
-    let exe_path = env::current_exe()?;
-    let our_cmd = format!("\"{}\" --reload", exe_path.display());
-
-    let hkcu = winreg::RegKey::predef(winreg::enums::HKEY_CURRENT_USER);
-    // Use the constants provided in the wrapper logic
-    let (key, _) = hkcu.create_subkey(REG_SUBKEY)?;
-
-    // 1. Check if an AutoRun already exists
-    let existing: String = key.get_value("AutoRun").unwrap_or_default();
-
-    // 2. Decide if we need to append or just set
-    let new_val = if existing.is_empty() {
-        our_cmd
-    } else if existing.contains("--reload") {
-        qprintln!(quiet, "ℹ️ Wrapper: AutoRun already configured.");
-        return Ok(());
-    } else {
-        // Append with '&' to preserve existing commands
-        format!("{} & {}", existing, our_cmd)
-    };
-
-    key.set_value("AutoRun", &new_val)?;
-    qprintln!(quiet, "✅ Wrapper: AutoRun hook installed (Preserved existing commands).");
-    Ok(())
-}
-
-pub fn query_alias(name: &str, mode: OutputMode) -> Vec<String> {
-    let mut results = Vec::new();
-    let search_target = name.to_lowercase();
-
-    let output = std::process::Command::new("doskey")
-        .args(["/macros:cmd.exe"])
-        .output();
-
-    if let Ok(out) = output {
-        let stdout = String::from_utf8_lossy(&out.stdout);
-        for line in stdout.lines() {
-            // Split only on the first '=' to handle "Beasts" in the value
-            if let Some((k, v)) = line.split_once('=') {
-                if k.trim_matches('"').to_lowercase() == search_target {
-                    results.push(format!("{}={}", k, v));
-                    return results;
-                }
-            }
-        }
-    }
-
-    if mode == OutputMode::Normal {
-        results.push(format!("⚠️ '{}' not found via doskey query.", name));
-    }
-    results
-}
-
-pub fn run_diagnostics(path: &Path) {
-    println!("--- 🛠️  Alias Tool Diagnostics ---");
-    if let Ok(p) = env::current_exe() { println!("Binary Loc:    {}", p.display()); }
-
-    // Cleaned up Env Var display (no % signs)
-    let env_file = env::var(ENV_ALIAS_FILE).unwrap_or_else(|_| "NOT SET".into());
-    let env_opts = env::var(ENV_ALIAS_OPTS).unwrap_or_else(|_| "NOT SET".into());
-
-    println!("Env Var:       {} = \"{}\"", ENV_ALIAS_FILE, env_file);
-    println!("Env Var:       {} = \"{}\"", ENV_ALIAS_OPTS, env_opts);
-    println!("Resolved Path: {}", path.display());
-
-    match path.metadata() {
-        Ok(m) => {
-            println!("File Status:   EXISTS {}", if m.permissions().readonly() { "(READ-ONLY ⚠️)" } else { "(WRITABLE ✅)" });
-            // Simple check to see if the drive is alive
-            if let Ok(mut f) = fs::File::open(path) {
-                let mut buf = [0; 1];
-                let _ = f.read(&mut buf);
-                println!("Drive Status:  RESPONSIVE ⚡");
-            }
-        }
-        Err(_) => println!("File Status:   MISSING OR INACCESSIBLE ❌"),
-    }
-
-    println!("\nRegistry Check (AutoRun):");
-    let reg = Command::new("reg").args(["query", &(vec![REG_CURRENT_USER, REG_SUBKEY].join(PATH_SEPARATOR)), "/v", "AutoRun"]).output();
-    if let Ok(out) = reg {
-        let s = String::from_utf8_lossy(&out.stdout);
-        // Checking if the current resolved path is actually in the AutoRun string
-        if s.contains(&path.to_string_lossy().into_owned()) || s.contains("alias") {
-            println!("  Status:      SYNCED ✅");
-        } else {
-            println!("  Status:      MISMATCH/NOT FOUND ⚠️");
-        }
-    }
-}
-
-pub fn get_autorun_command(alias_path: &Path) -> String {
-    // 1. Get the path to 'this' executable (the hybrid tool)
-    let current_exe = env::current_exe()
-        .unwrap_or_else(|_| "alias".into());
-
-    // 2. Format it for the Registry.
-    // We use /K (keep open) for cmd or just ensure it runs silently.
-    // The "doskey /macrofile=" part is the fallback,
-    // but we want our tool to handle it:
-
-    format!(
-        "\"{}\" --reload --file \"{}\"",
-        current_exe.display(),
-        alias_path.display()
-    )
-}
-
-pub fn get_all_aliases() -> Vec<(String, String)> {
-    let output = std::process::Command::new("doskey")
-        .arg("/macros:cmd.exe") // Target the same block as query
-        .output()
-        .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
-        .unwrap_or_default();
-
-    output.lines()
-        .filter_map(|line| {
-            // split_once preserves the "Beast" (everything after the first '=')
-            line.split_once('=').map(|(n, v)| (n.trim().to_string(), v.to_string()))
-        })
-        .collect()
-}
-
-pub fn alias_show_all() {
-    // 1. Get the wrapper-specific data
-    let os_pairs = get_all_aliases();
-
-    // 2. Hand off to the WRUM engine in alias_lib
-    // This will find the file, mesh them, and print the icons
-    alias_lib::perform_audit(os_pairs);
-}
-
-pub fn purge_ram_macros() -> io::Result<PurgeReport> {
-    let mut report = PurgeReport { cleared: Vec::new(), failed: Vec::new() };
-
-    // 1. Snapshot Before
-    let before = get_all_aliases();
-
-    // 2. Perform the Purge
-    for (name, _) in &before {
+    fn raw_set_macro(name: &str, value: Option<&str>) -> io::Result<bool> {
+        let val = value.unwrap_or(""); // doskey name= clears the macro
         let status = Command::new("doskey")
-            .arg(format!("{}=", name))
+            .args(["/exename=cmd.exe", &format!("{}={}", name, val)])
             .status()?;
-
-        if status.success() {
-            report.cleared.push(name.clone());
-        }
+        Ok(status.success())
     }
 
-    // 3. Snapshot After to find the "Unkillable" ones
-    let after = get_all_aliases();
-    for (name, _) in after {
-        // If it's still there, it failed to delete (moved from cleared to failed)
-        if let Some(pos) = report.cleared.iter().position(|x| x == &name) {
-            report.cleared.remove(pos);
-            report.failed.push((name, 0)); // 0 as a placeholder for Win32 Error Code
+    fn raw_reload_from_file(path: &Path) -> io::Result<()> {
+        let status = Command::new("doskey")
+            .arg(format!("/macrofile={}", path.display()))
+            .status()?;
+        if !status.success() {
+            return Err(io::Error::new(io::ErrorKind::Other, "Doskey failed to load file"));
         }
+        Ok(())
     }
 
-    Ok(report)
+    fn write_autorun_registry(cmd: &str, verbosity: Verbosity) -> io::Result<()> {
+        let hkcu = winreg::RegKey::predef(winreg::enums::HKEY_CURRENT_USER);
+        let (key, _) = hkcu.create_subkey(REG_SUBKEY)?;
+
+        let existing: String = key.get_value(REG_AUTORUN_KEY).unwrap_or_default();
+
+        if existing.contains(cmd) {
+            say!(verbosity, AliasIcon::Info, "AutoRun hook is already up to date.");
+            return Ok(());
+        }
+
+        let new_val = if existing.is_empty() {
+            cmd.to_string()
+        } else {
+            format!("{} & {}", existing, cmd)
+        };
+
+        key.set_value(REG_AUTORUN_KEY, &new_val)?;
+        say!(verbosity, AliasIcon::Ok, "AutoRun hook installed successfully.");
+        Ok(())
+    }
+
+    fn read_autorun_registry() -> String {
+        let hkcu = winreg::RegKey::predef(winreg::enums::HKEY_CURRENT_USER);
+        hkcu.open_subkey(REG_SUBKEY)
+            .and_then(|key| key.get_value(REG_AUTORUN_KEY))
+            .unwrap_or_default()
+    }
+
+    // --- 2. HIGH-LEVEL OVERRIDES (Specific to Wrapper) ---
+    fn get_all_aliases() -> Vec<(String, String)> {
+        let output = Command::new("doskey")
+            .arg("/macros:cmd.exe")
+            .output()
+            .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
+            .unwrap_or_default();
+
+        output.lines()
+            .filter_map(|line| {
+                let line = line.trim();
+                if line.is_empty() { return None; }
+
+                line.split_once('=')
+                    .map(|(n, v)| {
+                        // FIX: Strip literal quotes from both the name and the value
+                        let name = n.trim_matches('"').to_string();
+                        let val = v.trim_matches('"').to_string();
+                        (name, val)
+                    })
+            })
+            .collect()
+    }
+
+    fn query_alias(name: &str, mode: Verbosity) -> Vec<String> {
+        trace!("Querying for: {:?} (len: {})", name, name.len());
+        let search_target = name.to_lowercase();
+        let os_list = Self::get_all_aliases();
+
+        for (n, v) in os_list {
+            // We use debug formatting {:?} to see hidden characters in the comparison
+            trace!("Comparing: {:?} against {:?}", n.to_lowercase(), search_target);
+            if n.to_lowercase() == search_target {
+                trace!("  MATCH FOUND!");
+                return vec![format!("{}={}", n, v)];
+            }
+        }
+
+        trace!("  No match found in RAM.");
+        if mode.level == VerbosityLevel::Normal {
+            return vec![text!(mode, AliasIcon::Alert, "'{}' not found via doskey query.", name)];
+        }
+        vec![]
+    }
+
+    fn set_alias(opts: SetOptions, path: &Path, verbosity: Verbosity) -> io::Result<()> {
+        // Ensure name preservation
+        let name = if opts.force_case { opts.name.clone() } else { opts.name.to_lowercase() };
+
+        if !opts.volatile {
+            alias_lib::update_disk_file(&name, &opts.value, path)?;
+        }
+
+        // Pass the name exactly as computed above
+        if Self::raw_set_macro(&name, Some(&opts.value))? {
+            let tag = if opts.volatile { "(volatile)" } else { "(saved)" };
+            say!(verbosity, AliasIcon::Success, "Wrapper set {}: {}={}", tag, name, opts.value);
+        }
+        Ok(())
+    }
+
+    fn alias_show_all(verbosity: Verbosity) {
+        alias_lib::perform_audit(Self::get_all_aliases(), verbosity);
+    }
+
+    fn run_diagnostics(path: &Path, verbosity: Verbosity) {
+        let report = DiagnosticReport {
+            binary_path: env::current_exe().ok(),
+            resolved_path: path.to_path_buf(),
+            env_file: env::var(ENV_ALIAS_FILE).unwrap_or_else(|_| "NOT SET".into()),
+            env_opts: env::var(ENV_ALIAS_OPTS).unwrap_or_else(|_| "NOT SET".into()),
+            file_exists: path.exists(),
+            is_readonly: path.metadata().map(|m| m.permissions().readonly()).unwrap_or(false),
+            drive_responsive: is_drive_responsive(path),
+            registry_status: check_registry_wrapper(),
+            api_status: Some("SPAWNER (doskey.exe)".into()),
+        };
+        alias_lib::render_diagnostics(report, verbosity);
+    }
+}
+
+// Keep helper functions that aren't part of the trait contract
+fn check_registry_wrapper() -> RegistryStatus {
+    let raw = WrapperLibraryInterface::read_autorun_registry();
+    if raw.is_empty() {
+        RegistryStatus::NotFound
+    } else if raw.contains("--reload") || raw.contains("alias") {
+        RegistryStatus::Synced
+    } else {
+        RegistryStatus::Mismatch("Found other AutoRun commands".into())
+    }
 }

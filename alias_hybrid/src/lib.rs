@@ -1,112 +1,116 @@
-// alias_hybrid/src/lib.rs
-
 use std::io;
 use std::path::Path;
-
 use alias_lib::*;
-use alias_wrapper::*;
+use alias_win32::Win32LibraryInterface;
+use alias_wrapper::WrapperLibraryInterface;
 
 pub struct HybridLibraryInterface;
 
 impl AliasProvider for HybridLibraryInterface {
-    // MATCH: purge_ram_macros() -> io::Result<PurgeReport>
-    fn purge_ram_macros() -> io::Result<PurgeReport> {
-        match alias_win32::purge_ram_macros() {
-            Ok(report) if report.is_fully_clean() => Ok(report),
-            _ => alias_wrapper::purge_ram_macros(),
+    // --- 1. THE ATOMIC "HANDS" ---
+
+    fn raw_set_macro(name: &str, value: Option<&str>) -> io::Result<bool> {
+        // Try Win32 API first, fallback to Wrapper if API returns false
+        let success = Win32LibraryInterface::raw_set_macro(name, value)?;
+        if !success {
+            return WrapperLibraryInterface::raw_set_macro(name, value);
         }
+        Ok(true)
     }
 
-    // MATCH: reload_full(path: &Path, quiet: bool)
-    fn reload_full(path: &Path, quiet: bool) -> io::Result<()> {
-        // Step 1: Clear the RAM using the hybrid logic
-        let _ = Self::purge_ram_macros();
-
-        let definitions = parse_macro_file(path);
-        let mut api_success_count = 0;
-
-        // Step 2: Try the Win32 API
-        for (name, value) in &definitions {
-            if alias_win32::api_set_macro(name, Some(value)) {
-                api_success_count += 1;
-            }
-        }
-
-        // Step 3: Fallback if API missed anything
-        if api_success_count < definitions.len() {
-            qprintln!(quiet, "⚠️ API missed {} macros. Running Doskey fallback...", definitions.len() - api_success_count);
-            alias_wrapper::reload_doskey(path)?;
-        } else {
-            qprintln!(quiet, "✨ API Reload: {} macros synced.", definitions.len());
+    fn raw_reload_from_file(path: &Path) -> io::Result<()> {
+        if Win32LibraryInterface::raw_reload_from_file(path).is_err() {
+            return WrapperLibraryInterface::raw_reload_from_file(path);
         }
         Ok(())
     }
 
-    // MATCH: query_alias(name: &str, mode: OutputMode)
-    fn query_alias(term: &str, mode: OutputMode) -> Vec<String> {
-        // Since the trait doesn't pass the path, we resolve it internally
-        let path = get_alias_path().unwrap_or_default();
-
-        let mut output = alias_win32::query_alias(term, OutputMode::DataOnly);
-        if output.is_empty() {
-            output = alias_wrapper::query_alias(term, OutputMode::DataOnly);
+    fn get_all_aliases() -> Vec<(String, String)> {
+        let mut list = Win32LibraryInterface::get_all_aliases();
+        if list.is_empty() {
+            list = WrapperLibraryInterface::get_all_aliases();
         }
+        list
+    }
+
+    fn write_autorun_registry(cmd: &str, v: Verbosity) -> io::Result<()> {
+        Win32LibraryInterface::write_autorun_registry(cmd, v)
+    }
+
+    fn read_autorun_registry() -> String {
+        Win32LibraryInterface::read_autorun_registry()
+    }
+
+    // --- 2. THE CENTRALIZED LOGIC (Overriding Defaults for Hybrid Efficiency) ---
+
+    fn purge_ram_macros() -> io::Result<PurgeReport> {
+        let report = Win32LibraryInterface::purge_ram_macros()?;
+        if report.is_fully_clean() {
+            Ok(report)
+        } else {
+            // API missed something or failed; use the wrapper's aggressive nuke
+            WrapperLibraryInterface::purge_ram_macros()
+        }
+    }
+
+    fn reload_full(path: &Path, verbosity: Verbosity) -> io::Result<()> {
+        let _ = Self::purge_ram_macros();
+        let definitions = parse_macro_file(path);
+        let mut api_success_count = 0;
+
+        for (name, value) in &definitions {
+            if Win32LibraryInterface::raw_set_macro(name, Some(value)).unwrap_or(false) {
+                api_success_count += 1;
+            }
+        }
+
+        if api_success_count < definitions.len() {
+            shout!(verbosity, AliasIcon::Alert, "API missed {} macros. Running Fallback...", definitions.len() - api_success_count);
+            WrapperLibraryInterface::reload_full(path, verbosity)?;
+        } else {
+            whisper!(verbosity, AliasIcon::Success, "Hybrid Reload: {} macros via API.", api_success_count);
+        }
+        Ok(())
+    }
+
+    // Note: install_autorun is handled by the trait's default implementation
+    // using our atomic hands above, but you can override if needed.
+
+    fn query_alias(name: &str, verbosity: Verbosity) -> Vec<String> {
+        let mut output = Win32LibraryInterface::query_alias(name, verbosity.clone());
         if output.is_empty() {
-            output = query_alias_file(term, &path, mode);
+            output = WrapperLibraryInterface::query_alias(name, verbosity);
         }
         output
     }
 
-    // MATCH: set_alias(opts: SetOptions, path: &Path, quiet: bool)
-    fn set_alias(opts: SetOptions, path: &Path, quiet: bool) -> io::Result<()> {
+    fn set_alias(opts: SetOptions, path: &Path, verbosity: Verbosity) -> io::Result<()> {
         let name = if opts.force_case { opts.name.clone() } else { opts.name.to_lowercase() };
-        let value = opts.value.trim();
-        let val_opt = if value.is_empty() { None } else { Some(value) };
+        let val_opt = if opts.value.is_empty() { None } else { Some(opts.value.as_str()) };
 
-        // Attempt API strike
-        if !alias_win32::api_set_macro(&name, val_opt) {
-            // Fallback to Command line
-            let _ = std::process::Command::new("doskey")
-                .args(["/exename=cmd.exe", &format!("{}={}", name, value)])
-                .status();
+        if !Win32LibraryInterface::raw_set_macro(&name, val_opt).unwrap_or(false) {
+            WrapperLibraryInterface::set_alias(opts.clone(), path, verbosity.clone())?;
+        } else if !opts.volatile {
+            update_disk_file(&name, &opts.value, path)?;
         }
 
         if opts.volatile {
-            qprintln!(quiet, "⚡ Volatile alias: {}", name);
-            return Ok(());
+            say!(verbosity, AliasIcon::Win32, "Volatile strike (Hybrid): {}", name);
         }
-
-        alias_lib::update_disk_file(&name, value, path)
+        Ok(())
     }
 
-    // MATCH: alias_show_all()
-    fn alias_show_all() {
-        let path = get_alias_path().expect("❌ Missing alias file");
-        let w32 = alias_win32::get_all_aliases();
-        let wrap = alias_wrapper::get_all_aliases();
-        let file = alias_lib::parse_macro_file(&path);
-
-        alias_lib::perform_triple_audit(w32, wrap, file);
+    fn run_diagnostics(path: &Path, verbosity: Verbosity) {
+        // Hybrid diagnostics usually lean on the Win32 implementation for kernel info
+        Win32LibraryInterface::run_diagnostics(path, verbosity);
     }
 
-    // MATCH: run_diagnostics(path: &Path)
-    fn run_diagnostics(path: &Path) {
-        alias_win32::run_diagnostics(path);
-    }
+    fn alias_show_all(verbosity: Verbosity) {
+        let w32 = Win32LibraryInterface::get_all_aliases();
+        let wrap = WrapperLibraryInterface::get_all_aliases();
+        let file = get_alias_path().map(|p| parse_macro_file(&p)).unwrap_or_default();
 
-    // MATCH: install_autorun(quiet: bool)
-    fn install_autorun(quiet: bool) -> io::Result<()> {
-        let exe_path = std::env::current_exe()?;
-        let cmd = get_autorun_command(&exe_path);
-        let status = std::process::Command::new("reg")
-            .args(["add", REG_SUBKEY, "/v", REG_AUTORUN_KEY, "/t", "REG_EXPAND_SZ", "/d", &cmd, "/f"])
-            .status()?;
-
-        if status.success() {
-            qprintln!(quiet, "🛠️ AutoRun installed: {}", cmd);
-            Ok(())
-        } else {
-            Err(io::Error::new(io::ErrorKind::Other, "Registry update failed"))
-        }
+        // MATCHING YOUR ORDER: verbosity, then the three source vectors
+        perform_triple_audit(verbosity, w32, wrap, file);
     }
 }

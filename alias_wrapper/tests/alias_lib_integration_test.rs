@@ -1,4 +1,4 @@
-// alias_wrapper/tests/tests.rs
+// alias_wrapper/tests/alias_lib_integration_test.rs
 // 1. Pull in the public API of the library
 use alias_lib::*;
 
