@@ -1,3 +1,5 @@
+// alias_win32/tests/win32_local_tests.rs
+
 use std::fs;
 use std::path::PathBuf;
 #[allow(unused_imports)]
@@ -11,11 +13,9 @@ pub fn get_test_path(suffix: &str) -> PathBuf {
     PathBuf::from(format!("test_{}_{:?}.doskey", suffix, std::thread::current().id()))
 }
 
-#[test]
-#[serial]
-fn a_nuke_the_world() {
-    alias_nuke::kernel_wipe_macros();
-}
+//#[test]
+//#[serial]
+//fn a_nuke_the_world() {alias_nuke::kernel_wipe_macros();}
 
 #[test]
 #[serial]
@@ -134,7 +134,7 @@ fn test_win32_international_roundtrip() {
 
 #[test]
 #[serial]
-fn test_registry_append_logic() {
+fn test_registry_append_logic_library() {
     use winreg::RegKey;
     use winreg::enums::HKEY_CURRENT_USER;
 
@@ -167,6 +167,10 @@ fn test_thread_silo_isolation() {
     Win32LibraryInterface::raw_set_macro(name_a, None).unwrap();
     Win32LibraryInterface::raw_set_macro(name_b, None).unwrap();
 }
+
+type P = Win32LibraryInterface; // Define P for the template
+
+include!("../../tests/cli_tests_win32.rs");
 
 #[test]
 #[serial]

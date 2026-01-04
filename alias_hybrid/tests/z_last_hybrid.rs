@@ -1,3 +1,5 @@
+// alias_hybrid/tests/z_last_hybrid.rs
+
 use std::path::Path;
 use std::process::Command;
 use assert_cmd::cargo_bin;
@@ -72,3 +74,8 @@ fn test_ui_audit_logic() {
         std::fs::remove_file(dummy_path).ok();
     }
 }
+
+use alias_win32::{REG_SUBKEY, REG_AUTORUN_KEY};
+type P = HybridLibraryInterface; // Define P for the template
+
+include!("../../tests/cli_tests_win32.rs");

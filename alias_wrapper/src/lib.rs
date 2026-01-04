@@ -58,6 +58,7 @@ impl alias_lib::AliasProvider for WrapperLibraryInterface {
     }
 
     // --- 2. HIGH-LEVEL OVERRIDES (Specific to Wrapper) ---
+    /*
     fn get_all_aliases() -> Vec<(String, String)> {
         let output = Command::new("doskey")
             .arg("/macros:cmd.exe")
@@ -77,6 +78,23 @@ impl alias_lib::AliasProvider for WrapperLibraryInterface {
                         let val = v.trim_matches('"').to_string();
                         (name, val)
                     })
+            })
+            .collect()
+    }
+     */
+    fn get_all_aliases() -> Vec<(String, String)> {
+        let output = Command::new("doskey")
+            .arg("/macros:cmd.exe")
+            .output()
+            .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
+            .unwrap_or_default();
+
+        output.lines()
+            .filter_map(|line| {
+                let line = line.trim();
+                if line.is_empty() { return None; }
+                line.split_once('=')
+                    .map(|(n, v)| (n.trim_matches('"').to_string(), v.trim_matches('"').to_string()))
             })
             .collect()
     }

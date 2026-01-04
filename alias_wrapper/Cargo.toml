@@ -11,6 +11,7 @@ winreg = "0.55.0"
 [dev-dependencies]
 serial_test = "3.1.1"
 alias_nuke = { path = "../alias_nuke" }
+assert_cmd = "2.0"
 
 [features]
 test_utils = []

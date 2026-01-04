@@ -7,6 +7,7 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
+// use crate::ShowFeature::On;
 
 #[macro_export]
 macro_rules! trace {
@@ -48,6 +49,8 @@ macro_rules! to_bool {
     (ShowIcons::Off) => { false };
     (ShowTips::On) => { true };
     (ShowTips::Off) => { false };
+    (DisplayTip::On) => { true };
+    (DisplayTip::Off) => { false };
     (ShowFeature::On) => { true };
     (ShowFeature::Off) => { false };
     ($val:expr) => { $val.is_on() };
@@ -130,24 +133,24 @@ pub const ICON_TYPES: usize = AliasIcon::_VariantCount as usize;
 
 pub static ICON_MATRIX: [[&str; 2]; ICON_TYPES] = [
     ["", ""], // None
-    ["W",  "⚡ "], // Win32
-    ["K",  "🔑 "], // Doskey
-    ["D",  "💽 "], // Disk
-    ["!!", "⚠️  "], // Alert
-    ["OK", "✨ "], // Success
-    ["I",  "ℹ️  "], // Info
-    ["-",  "📜  "], // Say
-    ["_",  "➢  "], // Whisper
-    ["!",  "🚫  "], // Shout
-    ["!!", "⛔  "], // Scream
-    ["X",  "❌  "], // Fail
-    ["H",  "💡  "], // Hint
-    ["E",  "♻️  "], // Env
-    ["+",  "✅  "], // OK
-    ["#",  "🛠️  "], // Tools
-    ["F",  "📁  "], // File
-    ["P",  "🛣️  "], // Path
-    ["T",  "️💬  "], // Text
+    ["W",  "⚡"], // Win32
+    ["K",  "🔑"], // Doskey
+    ["D",  "💽"], // Disk
+    ["!!", "⚠️"], // Alert
+    ["OK", "✨"], // Success
+    ["I",  "ℹ️"], // Info
+    ["-",  "📜"], // Say
+    ["_",  "➢"], // Whisper
+    ["!",  "🚫"], // Shout
+    ["!!", "⛔"], // Scream
+    ["X",  "❌"], // Fail
+    ["H",  "💡"], // Hint
+    ["E",  "♻️"], // Env
+    ["+",  "✅"], // OK
+    ["#",  "🛠️"], // Tools
+    ["F",  "📁"], // File
+    ["P",  "🛣️"], // Path
+    ["T",  "️💬"], // Text
 
 ];
 
@@ -157,6 +160,7 @@ pub struct Verbosity {
     pub level: VerbosityLevel,
     pub decorations: bool,
     pub show_tips: bool,
+    pub display_tip: bool,
 }
 
 impl Verbosity {
@@ -169,6 +173,7 @@ impl Verbosity {
             level: VerbosityLevel::Normal,
             decorations: true,
             show_tips: true,
+            display_tip: false,
         }
     }
 
@@ -177,6 +182,7 @@ impl Verbosity {
             level: VerbosityLevel::Silent,
             decorations: false,
             show_tips: false,
+            display_tip: false,
         }
     }
 
@@ -196,6 +202,7 @@ impl Verbosity {
         if let Some(m) = msg {
             // We use Hint icon (💡) for tips
             let formatted = self.icon_format(AliasIcon::Hint, m);
+            self.say("\n");
             self.say(&formatted);
         }
     }
@@ -203,7 +210,7 @@ impl Verbosity {
     pub fn show_xmas_lights(&self) -> bool { self.decorations && self.show_audit() }
 
     pub fn text(&self, msg: &str) -> String {
-        return msg.to_string();
+        msg.to_string()
     }
 
     pub fn whisper(&self, msg: &str) {
@@ -233,21 +240,23 @@ impl Verbosity {
             println!("{}", self.icon_format(AliasIcon::Info, msg));
         }
     }
-
     pub fn align(&self, name: &str, value: &str, width: usize, wdf: (bool, bool, bool)) {
         if self.level == VerbosityLevel::Mute { return; }
+
         let display_val = if value.is_empty() { "<EMPTY>" } else { value };
         let line = format!("{}={}", name, display_val);
+        let (w, d, f) = wdf;
 
-        if self.show_audit() {
-            let (w, d, f) = wdf;
-            let w_m = if w { self.get_icon_str(AliasIcon::Win32) } else { " " };
-            let d_m = if d { self.get_icon_str(AliasIcon::Doskey) } else { " " };
-            let f_m = if f { self.get_icon_str(AliasIcon::File) } else { " " };
-            println!("{:width$} [{}{}{}]", line, w_m, d_m, f_m, width = width);
-        } else {
-            println!("{}", line);
-        }
+        // --- THE FIX ---
+        // Emojis (decorations) occupy 2 terminal columns.
+        // ASCII letters/spaces occupy 1.
+        let spacer = if self.decorations { "  " } else { " " };
+
+        let w_m = if w { self.get_icon_str(AliasIcon::Win32) } else { spacer };
+        let d_m = if d { self.get_icon_str(AliasIcon::Doskey) } else { spacer };
+        let f_m = if f { self.get_icon_str(AliasIcon::File)   } else { spacer };
+
+        print!("{:width$} [{}{}{}]", line, w_m, d_m, f_m, width = width);
     }
 }
 
@@ -261,6 +270,8 @@ pub enum AliasAction {
     Set(SetOptions),
     Query(String),
     Edit(Option<String>),
+    Remove(String),
+    Unalias(String),
     Clear,
     Help,
     Reload,
@@ -284,6 +295,7 @@ impl ShowFeature {
 
 pub type ShowIcons = ShowFeature;
 pub type ShowTips  = ShowFeature;
+pub type DisplayTip  = ShowFeature;
 
 #[derive(Debug, PartialEq, Clone)]
 pub struct SetOptions {
@@ -404,6 +416,13 @@ pub trait AliasProvider {
     fn alias_show_all(verbosity: Verbosity);
 }
 
+#[cfg(test)]
+pub fn get_alias_directory() -> Result<std::path::PathBuf, String> {
+    std::env::current_exe()
+        .map(|p| p.parent().unwrap_or(&p).to_path_buf())
+        .map_err(|e| e.to_string())
+}
+
 // --- Main Runner ---
 pub fn run<P: AliasProvider>(mut args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
     // 1. Handle ENV_ALIAS_OPTS injection
@@ -416,7 +435,7 @@ pub fn run<P: AliasProvider>(mut args: Vec<String>) -> Result<(), Box<dyn std::e
     }
 
     // 2. Parse intent (Now handles --file and identifies ShowAll)
-    let (action, mut verbosity, cli_path) = parse_alias_args(&args);
+    let (action, verbosity, cli_path) = parse_alias_args(&args);
 
     // 3. Resolve Path: Flag > Env > Default
     let path = cli_path
@@ -425,12 +444,17 @@ pub fn run<P: AliasProvider>(mut args: Vec<String>) -> Result<(), Box<dyn std::e
 
     // 4. Special Case: If it's just "alias" (ShowAll), override verbosity to be clean
     // This replaces your 'if args.len() == 1' logic
-    if args.len() == 1 && action == AliasAction::ShowAll {
-        verbosity = voice!(Normal, ShowIcons::Off, ShowTips::Off);
-    }
+    // if args.len() == 1 && action == AliasAction::ShowAll {
+    //     verbosity = voice!(Normal, ShowIcons::Off, ShowTips::Off);
+    // }
 
     // 5. Dispatch
-    dispatch::<P>(action, verbosity, &path)
+    let result = dispatch::<P>(action, verbosity, &path);
+    if verbosity.display_tip {
+        say!(verbosity, AliasIcon::None, "\n");
+        say!(verbosity, AliasIcon::Info, get_random_tip());
+    }
+    result
 }
 
 pub fn dispatch<P: AliasProvider>(
@@ -453,12 +477,46 @@ pub fn dispatch<P: AliasProvider>(
                 verbosity.whisper(&line);
             }
         }
+        AliasAction::Unalias(raw_name) => {
+            let name = raw_name.split('=').next().unwrap_or(&raw_name).trim();
+            if !name.is_empty() {
+                let opts = SetOptions {
+                    name: name.to_string(),
+                    value: String::new(), // The "unset" trigger
+                    volatile: true,       // Memory only
+                    force_case: false,
+                };
+                P::set_alias(opts, path, verbosity)?;
+                say!(verbosity, AliasIcon::Win32,"Removed alias {}", name);
+            } else {
+                scream!(verbosity, "Error: need an alias to remove")
+            }
+        }
+        AliasAction::Remove(raw_name) => {
+            let name = raw_name.split('=').next().unwrap_or(&raw_name).trim();
+            if !name.is_empty() {
+                let opts = SetOptions {
+                    name: name.to_string(),
+                    value: String::new(), // The "unset" trigger
+                    volatile: false,       // Memory only
+                    force_case: false,
+                };
+                P::set_alias(opts, path, verbosity)?;
+                say!(verbosity, AliasIcon::File,"Removed alias {}", name);
+            } else {
+                scream!(verbosity, "Error: need an alias to remove")
+            }
+        }
         AliasAction::Set(opts) => P::set_alias(opts, path, verbosity)?, // Fixed Missing Arm
         AliasAction::Edit(custom_editor) => {
             open_editor(path, custom_editor, verbosity)?;
             P::reload_full(path, verbosity)?;
         }
-        AliasAction::Which => P::run_diagnostics(path, verbosity),
+        AliasAction::Which => {
+            P::alias_show_all(verbosity);
+            say!(verbosity, AliasIcon::None, "\n");
+            P::run_diagnostics(path, verbosity);
+        },
         AliasAction::Setup => P::install_autorun(verbosity)?,
         AliasAction::Help => print_help(verbosity, HelpMode::Full, Some(path)),
         AliasAction::Invalid => {
@@ -527,22 +585,25 @@ pub fn display_audit(mesh_list: &[AliasEntryMesh], verbosity: Verbosity) {
 }
 
 pub fn perform_triple_audit(
-    verbosity: Verbosity, // Pass the baton in
+    verbosity: Verbosity,
     win32_pairs: Vec<(String, String)>,
     mut wrap_pairs: Vec<(String, String)>,
     mut file_pairs: Vec<(String, String)>
 ) {
     let mut desync_detected = false;
 
-    // 1. Calculate the max width for the names
+    // 1. Calculate max width for perfect vertical alignment of the [WDF] block
+    // We add 5 to give a small breathing room buffer
     let max_len = win32_pairs.iter()
+        .chain(wrap_pairs.iter())
+        .chain(file_pairs.iter())
         .map(|(n, v)| format!("{}={}", n, v).len())
         .max()
-        .unwrap_or(35);
+        .unwrap_or(35) + 5;
 
-    say!(verbosity, AliasIcon::Info, "Triple Audit [W=Win32, D=Doskey, F=File]");
+    say!(verbosity, AliasIcon::Info, "Triple Audit [W=Win32, D=Doskey, F=File]\n");
 
-    // 2. Primary Loop: Win32 is the source of truth
+    // 2. PRIMARY LOOP: Win32 is the Current Kernel State
     for (name, w_val) in win32_pairs {
         let d_idx = wrap_pairs.iter().position(|(n, _)| n == &name);
         let f_idx = file_pairs.iter().position(|(n, _)| n == &name);
@@ -550,42 +611,45 @@ pub fn perform_triple_audit(
         let d_val = d_idx.map(|i| wrap_pairs.remove(i).1);
         let f_val = f_idx.map(|i| file_pairs.remove(i).1);
 
-        // Use your align method! (Win32 is always true here)
-        verbosity.align(&name, &w_val, max_len + 5, (true, d_val.is_some(), f_val.is_some()));
+        // Align the base entry
+        verbosity.align(&name, &w_val, max_len, (true, d_val.is_some(), f_val.is_some()));
 
-        // Discrepancy Detection using the friendly macros
-        if let Some(dv) = &d_val {
-            if &w_val != dv {
-                shout!(verbosity, &format!("VALUE DESYNC: Doskey wrapper sees \"{}\"", dv));
+        // Check for value discrepancies
+        if let Some(dv) = d_val {
+            if w_val != dv {
+                print!(" !! Doskey: '{}'", dv);
                 desync_detected = true;
             }
         }
-        if let Some(fv) = &f_val {
-            if &w_val != fv {
-                scream!(verbosity, &format!("FILE MISMATCH: File expects \"{}\"", fv));
+        if let Some(fv) = f_val {
+            if w_val != fv {
+                print!(" !! File: '{}'", fv);
                 desync_detected = true;
             }
         }
+        println!(); // Terminate the line
     }
 
-    // 3. Leftovers in Doskey (Phantom)
+    // 3. PHANTOM LOOP: In Doskey (Legacy/Wrapper) but missing from Win32 Kernel
     for (name, d_val) in wrap_pairs {
         let f_idx = file_pairs.iter().position(|(n, _)| n == &name);
         let f_val = f_idx.map(|i| file_pairs.remove(i).1);
 
-        verbosity.align(&name, &d_val, max_len + 5, (false, true, f_val.is_some()));
-        shout!(verbosity, "PHANTOM: In Doskey, not Win32.");
+        verbosity.align(&name, &d_val, max_len, (false, true, f_val.is_some()));
+        print!(" <- PHANTOM: In Doskey, not Win32.");
+        println!();
         desync_detected = true;
     }
 
-    // 4. Leftovers in File (Pending)
+    // 4. PENDING LOOP: In the .doskey file but not loaded into the OS
     for (name, f_val) in file_pairs {
-        verbosity.align(&name, &f_val, max_len + 5, (false, false, true));
-        shout!(verbosity, "PENDING: In File, not OS.");
+        verbosity.align(&name, &f_val, max_len, (false, false, true));
+        print!(" <- PENDING: In File, not OS.");
+        println!();
         desync_detected = true;
     }
 
-    // 5. The Sovereign Reminder
+    // 5. Final Footer
     if desync_detected {
         say!(verbosity, AliasIcon::Info, "Tip: Out of sync? Run `alias --reload` to align RAM with your config file.");
     }
@@ -657,7 +721,7 @@ pub fn parse_alias_args(args: &[String]) -> (AliasAction, Verbosity, Option<Path
                 "--quiet"    => { voice.level = VerbosityLevel::Silent; voice.decorations = false; }
                 "--temp"     => volatile = true,
                 "--force"    => force_case = true,
-                "--tips"     => voice.show_tips = true,
+                "--tips"     => { voice.show_tips = true; voice.display_tip = true; },
                 "--no-tips"  => voice.show_tips = false,
                 "--icons"    => voice.decorations = true,
                 "--no-icons" => voice.decorations = false,
@@ -666,6 +730,11 @@ pub fn parse_alias_args(args: &[String]) -> (AliasAction, Verbosity, Option<Path
                         custom_path = Some(PathBuf::from(path_str));
                         skip_next = true;
                     }
+                }
+                "--unalias" | "--remove" => {
+                    // Found a command, pivot here so Step 2 catches it in f_args
+                    pivot_index = i;
+                    break;
                 }
                 _ => { pivot_index = i; break; }
             }
@@ -689,6 +758,7 @@ pub fn parse_alias_args(args: &[String]) -> (AliasAction, Verbosity, Option<Path
 
     let first = f_args[0].to_lowercase();
 
+    // 1. Check for Editor Commands
     if first.starts_with("--edalias") || first.starts_with("--edaliases") {
         let editor = if let Some((_, ed)) = first.split_once('=') {
             Some(ed.to_string())
@@ -698,10 +768,23 @@ pub fn parse_alias_args(args: &[String]) -> (AliasAction, Verbosity, Option<Path
         return (AliasAction::Edit(editor), voice, custom_path);
     }
 
+    // 2. Check for Deletion Commands (MOVED UP)
+    if first == "--unalias" {
+        let target = f_args.get(1).cloned().unwrap_or_default();
+        return (AliasAction::Unalias(target), voice, custom_path);
+    }
+
+    if first == "--remove" {
+        let target = f_args.get(1).cloned().unwrap_or_default();
+        return (AliasAction::Remove(target), voice, custom_path);
+    }
+
+    // 3. Check for Resolved Commands (Setup, Reload, etc.)
     if let Some(action) = resolve_command(&first) {
         return (action, voice, custom_path);
     }
 
+    // 4. Validate Name (Only for standard Set/Query)
     if !is_valid_name_loose(&first) {
         return (AliasAction::Invalid, voice, custom_path);
     }
@@ -842,8 +925,8 @@ pub fn render_diagnostics(report: DiagnosticReport, verbosity: Verbosity) {
         say!(verbosity, AliasIcon::Disk, "Binary Loc:    {}", p.display());
     }
 
-    say!(verbosity, AliasIcon::File, "File Var:       {} = \"{}\"", ENV_ALIAS_FILE, report.env_file);
-    say!(verbosity, AliasIcon::Environment, "Env Var:        {} = \"{}\"", ENV_ALIAS_OPTS, report.env_opts);
+    say!(verbosity, AliasIcon::File, "File Var:      {} = \"{}\"", ENV_ALIAS_FILE, report.env_file);
+    say!(verbosity, AliasIcon::Environment, "Env Var:       {} = \"{}\"", ENV_ALIAS_OPTS, report.env_opts);
     say!(verbosity, AliasIcon::Path, "Resolved Path: {}", report.resolved_path.display());
 
     // Status logic centered in one place
@@ -901,13 +984,45 @@ pub fn perform_autorun_install<P: AliasProvider>(
 fn get_random_tip() -> &'static str {
     let tips = [
         "Tired of Notepad? Set 'EDITOR=code' in your env to use VS Code for --edalias.",
+        "Tired of Notepad? Set 'VISUAL=code' in your env to use VS Code for --edalias.",
         "Use --temp to keep an alias in RAM only—it vanishes when you close the window.",
         "The Audit (alias --which) checks if your File, and the system are in sync.",
         "You can use $* in your values! e.g., 'alias g=git $*' passes all args to git.",
-        "Hate icons? Set 'ALIAS_OPTS=--quiet' in your system environment to hide them.",
+        "Hate icons? Set 'ALIAS_OPTS=--no-icons' in your system environment to hide them.",
+        "Too noisy? Set 'ALIAS_OPTS=--quiet' to reduce the output.",
         "Run 'alias --reload' to force-sync your current session with your config file.",
         "alias --setup hooks into the registry so your macros 'just work' in every window.",
         "Type 'alias <name>' (without an '=') to see what a specific macro does.",
+        "Atomic saving ensures your alias file is never corrupted by a mid-write crash.",
+        "Put flags in 'ALIAS_OPTS' to set global defaults like --quiet or --no-tips.",
+        "--which finds 'Phantom' aliases—RAM macros no longer in your config file.",
+        "Setting an alias to empty (alias x=) is a shortcut for the --remove command.",
+        "A 'Pending' audit status means your file changed but you haven't run --reload.",
+        "Diagnostics do a 1-byte 'heartbeat' to verify your drive is responsive.",
+        "Deletions ignore case to prevent messy 'G=git' and 'g=git' duplicates.",
+        "--setup hooks the AutoRun registry so macros work in every new window.",
+        "The tool detects 'Read-Only' files and warns you before attempting a strike.",
+        "Use --file <path> to use a custom alias list without changing env vars.",
+        "The Triple Audit aligns icons in a vertical [WDF] block for easy scanning.",
+        "Checking registry sync ensures your AutoRun points to the right alias.exe.",
+        "Use a filename 'set ALIAS_FILE=' in your env to use a default aliases file",
+        "Tired of resetting your aliases every time? try --setup",
+        "The tool uses an 'Atomic Rename' when saving, so your alias file is never corrupted if a crash occurs during a write.",
+        "Flags placed in the 'ALIAS_OPTS' env var are auto-injected, letting you set global defaults like --quiet or --no-tips.",
+        "Running --which identifies 'Phantom' aliases—macros stuck in your RAM that no longer exist in your config file.",
+        "Setting an alias to an empty value (e.g., 'alias x=') is a fast shortcut for the permanent --remove command.",
+        "The 'Triple Audit' compares the Win32 Kernel, Doskey wrapper, and your File to find every possible synchronization gap.",
+        "A 'Pending' status in the audit means you've saved a change to your file but haven't run 'alias --reload' to activate it.",
+        "The tool performs a 1-byte 'heartbeat' read on your config file to verify your drive is actually alive and responsive.",
+        "Case-insensitivity is enforced during deletions to prevent messy duplicates like 'G=git' and 'g=git' in your file.",
+        "The --setup flag hooks your aliases into the 'AutoRun' registry so they are available in every new console window.",
+        "The tool automatically detects if your alias file is 'Read-Only' and will warn you before attempting a strike.",
+        "You can use --file <path> to temporarily use a different alias collection without changing your environment variables.",
+        "Diagnostics check your registry sync status to ensure your AutoRun command matches the current location of alias.exe.",
+        "Transactional logic ensures that if a file write fails, the RAM state isn't updated, keeping your system in a known state.",
+        "The 'Triple Audit' alignment uses 2-column spacing for icons to ensure the [WDF] block stays perfectly vertical.",
+        "The tool identifies 'Legacy Wrappers' vs 'Win32 Kernel' aliases to help debug issues with different terminal types.",
+        "Your current binary location is tracked in diagnostics to help you find where alias.exe is actually running from.",
     ];
 
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -929,6 +1044,7 @@ pub fn print_help(verbosity: Verbosity, mode: HelpMode, path: Option<&Path>) {
     say!(verbosity, AliasIcon::None, r#"
 USAGE:
   alias                       List active macros
+  alias                       List active macros
   alias <name>                Search for a specific macro
   alias <name>=[value]        Set or delete (if empty) a macro
   alias <name> [value]        Set a macro (alternate syntax)
@@ -942,13 +1058,16 @@ USAGE:
 FLAGS:
   --help                  Show this help menu
   --quiet                 Suppress success output & icons
-  --file <path>           Specify a custom .doskey file
-  --reload                Force reload from file
-  --setup                 Install AutoRun registry hook
-  --which                 Run diagnostics & Triple Audit
   --edalias[=EDITOR]      Open alias file in editor
-  --temp                  Set alias in RAM only (volatile)
+  --file <path>           Specify a custom .doskey file
   --force                 Bypass case-sensitivity checks
+  --reload                Force reload from file
+  --remove                Remove a specific alias from the alias file
+  --setup                 Install AutoRun registry hook
+  --[no-]tips             Enable/Disable tips
+  --unalias               Remove a specific alias from memory
+  --temp                  Set alias in RAM only (volatile)
+  --which                 Run diagnostics & Triple Audit
 "#);
 
     // 3. Environment (Keep these separate to use the Constants)

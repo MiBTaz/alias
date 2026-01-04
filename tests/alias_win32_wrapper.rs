@@ -1,5 +1,6 @@
 // tests/alias_win32_wrapper.rs
 
+#[allow(unused_imports)]
 use std::fs;
 use std::path::PathBuf;
 #[allow(unused_imports)]
@@ -104,9 +105,6 @@ fn test_v() -> Verbosity {
     voice!(Silent, ShowFeature::Off, ShowFeature::Off)
 }
 
-pub fn get_test_path(suffix: &str) -> PathBuf {
-    PathBuf::from(format!("test_{}_{:?}.doskey", suffix, std::thread::current().id()))
-}
 
 
 #[test]
@@ -298,9 +296,80 @@ fn test_routine_reload_sync() {
     let _ = fs::remove_file(path);
 }
 
+// Helper for unique test paths
+pub fn get_test_path(suffix: &str) -> PathBuf {
+    PathBuf::from(format!("test_{}_{:?}.doskey", suffix, std::thread::current().id()))
+}
+#[test]
+#[serial]
+fn test_win32_api_roundtrip() {
+    let name = "test_alias_123";
+    let val = "echo hello";
+    P::raw_set_macro(name, Some(val)).unwrap();
+    let all = P::get_all_aliases();
+    let found = all.iter().find(|(n, _)| n == name);
+    assert!(found.is_some());
+    P::raw_set_macro(name, None).unwrap();
+}
+
+#[test]
+#[serial]
+fn test_routine_clear_ram() {
+    let name = "purge_me";
+    P::raw_set_macro(name, Some("temporary")).unwrap();
+    let _ = P::purge_ram_macros().expect("Purge failed");
+    let results = P::query_alias(name, Verbosity::normal());
+    assert!(results.iter().all(|s| !s.contains("temporary")));
+}
+
+#[test]
+#[serial]
+fn test_routine_delete_sync() {
+    let path = get_test_path("del");
+    fs::write(&path, "ghost=gone\n").unwrap();
+    P::raw_set_macro("ghost", Some("gone")).unwrap();
+    let opts = SetOptions {
+        name: "ghost".into(),
+        value: "".into(),
+        volatile: false,
+        force_case: false,
+    };
+    P::set_alias(opts, &path, Verbosity::normal()).unwrap();
+    let query = P::query_alias("ghost", Verbosity::normal());
+    assert!(query.is_empty() || query[0].contains("not found"));
+    let _ = fs::remove_file(path);
+}
+
+#[test]
+#[serial]
+fn test_thread_silo_isolation() {
+    let pid = std::process::id();
+    let name_a = format!("silo_a_{}", pid);
+    let name_b = format!("silo_b_{}", pid);
+
+    // 1. Set A
+    P::raw_set_macro(&name_a, Some("val_a")).unwrap();
+    // 2. Set B
+    P::raw_set_macro(&name_b, Some("val_b")).unwrap();
+
+    std::thread::sleep(std::time::Duration::from_millis(50));
+
+    let all = P::get_all_aliases();
+
+    // Prove both exist independently
+    let has_a = all.iter().any(|(n, _)| n == &name_a);
+    let has_b = all.iter().any(|(n, _)| n == &name_b);
+
+    assert!(has_a, "Missing A");
+    assert!(has_b, "Missing B");
+
+    // Cleanup
+    P::raw_set_macro(&name_a, None).unwrap();
+    P::raw_set_macro(&name_b, None).unwrap();
+}
+
 #[test]
 #[serial]
 fn z_nuke_the_world_end() {
     alias_nuke::kernel_wipe_macros();
 }
-

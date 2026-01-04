@@ -57,3 +57,5 @@ fn test_wrapper_setup_flow() {
 fn get_test_path(suffix: &str) -> std::path::PathBuf {
     std::path::PathBuf::from(format!("test_wrapper_{}_{:?}.doskey", suffix, std::thread::current().id()))
 }
+
+include!("../../tests/cli_tests_wrapper.rs");

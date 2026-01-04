@@ -3,11 +3,42 @@
 use crate::*;
 use std::env;
 use std::fs;
-use std::path::PathBuf;
-
+use std::path::{Path, PathBuf};
+// use super::*;
+use std::io;
+use std::sync::Mutex;
 // =========================================================
 // 1. COMMAND PARSER & ACTION MAPPING (22 Tests)
 // =========================================================
+
+
+// --- SHARED TEST STATE ---
+static LAST_CALL: Mutex<Option<SetOptions>> = Mutex::new(None);
+
+// --- MOCK PROVIDER ---
+// Members ordered exactly as the AliasProvider trait
+struct MockProvider;
+impl AliasProvider for MockProvider {
+    // 1. ATOMIC HANDS
+    fn raw_set_macro(_: &str, _: Option<&str>) -> io::Result<bool> { Ok(true) }
+    fn raw_reload_from_file(_: &Path) -> io::Result<()> { Ok(()) }
+    fn get_all_aliases() -> Vec<(String, String)> { vec![] }
+    fn write_autorun_registry(_: &str, _: Verbosity) -> io::Result<()> { Ok(()) }
+    fn read_autorun_registry() -> String { String::new() }
+
+    // 2. CENTRALIZED LOGIC HOOKS
+    fn query_alias(_: &str, _: Verbosity) -> Vec<String> { vec![] }
+
+    fn set_alias(opts: SetOptions, _: &Path, _: Verbosity) -> io::Result<()> {
+        let mut call = LAST_CALL.lock().unwrap();
+        *call = Some(opts);
+        Ok(())
+    }
+
+    fn run_diagnostics(_: &Path, _: Verbosity) {}
+    fn alias_show_all(_: Verbosity) {}
+}
+
 
 #[test]
 fn test_show_all() {
@@ -375,4 +406,76 @@ fn test_parse_custom_file_flag() {
 
     assert_eq!(action, AliasAction::Query("ls".into()));
     assert_eq!(path, Some(PathBuf::from("C:\\temp\\test.doskey")));
+}
+
+// --- NEW INTEGRATION TESTS ---
+
+#[test]
+fn test_unalias_precision_strike() {
+    let path = PathBuf::from("test.doskey");
+    let verb = Verbosity::silent();
+
+    // Verifies the "rust=cargo" -> "rust" split logic in dispatcher
+    let action = AliasAction::Unalias("rust=cargo".to_string());
+    dispatch::<MockProvider>(action, verb, &path).unwrap();
+
+    let result = LAST_CALL.lock().unwrap().take().expect("set_alias should have been called");
+
+    assert_eq!(result.name, "rust");
+    assert_eq!(result.value, "");
+    assert!(result.volatile); // Unalias must be volatile
+}
+
+#[test]
+fn test_remove_persistence() {
+    let path = PathBuf::from("test.doskey");
+    let verb = Verbosity::silent();
+
+    // Verifies the --remove command forces persistence (volatile: false)
+    let action = AliasAction::Remove("ls".to_string());
+    dispatch::<MockProvider>(action, verb, &path).unwrap();
+
+    let result = LAST_CALL.lock().unwrap().take().expect("set_alias should have been called");
+
+    assert_eq!(result.name, "ls");
+    assert_eq!(result.value, "");
+    assert!(!result.volatile); // Remove must NOT be volatile
+}
+
+#[test]
+fn test_parser_unalias_routing() {
+    let args = vec![
+        "alias.exe".into(),
+        "--quiet".into(),       // Flag from Step 1
+        "--unalias".into(),     // Command from Step 4
+        "my_macro=stuff".into(), // Payload
+    ];
+
+    let (action, voice, _) = parse_alias_args(&args);
+
+    // Verify Step 1 flags were preserved
+    assert_eq!(voice.level, VerbosityLevel::Silent);
+
+    // Verify Step 4 correctly identified Unalias and grabbed the target
+    if let AliasAction::Unalias(target) = action {
+        assert_eq!(target, "my_macro=stuff");
+    } else {
+        panic!("Expected AliasAction::Unalias, got {:?}", action);
+    }
+}
+
+#[test]
+fn test_parser_remove_routing() {
+    let args = vec![
+        "alias.exe".into(),
+        "--remove".into(),
+        "target_alias".into(),
+    ];
+    let (action, _, _) = parse_alias_args(&args);
+
+    if let AliasAction::Remove(target) = action {
+        assert_eq!(target, "target_alias");
+    } else {
+        panic!("Expected AliasAction::Remove");
+    }
 }
