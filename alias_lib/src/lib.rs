@@ -21,22 +21,30 @@ macro_rules! trace {
 
 #[macro_export]
 macro_rules! voice {
-    // If the user passes 'Off' or 'On' directly
+    // 1. Direct "Off" call
     ($level:ident, Off, Off) => {
         $crate::Verbosity {
             level: $crate::VerbosityLevel::$level,
             decorations: false,
-            show_tips: false,
+            show_tips: $crate::ShowTips::Off,
+            display_tip: None,
         }
     };
-    // General case for ShowFeature::Off or variables
-    ($level:ident, $icons:expr, $tips:expr) => {
+    // 2. General case
+    ($level:ident, $icons:expr, $tips:expr) => {{
+        let tips_setting = $tips;
         $crate::Verbosity {
             level: $crate::VerbosityLevel::$level,
             decorations: $icons.is_on(),
-            show_tips: $tips.is_on(),
+            show_tips: tips_setting,
+            // We store the OPTION of the tip string here, once.
+            display_tip: match tips_setting {
+                $crate::ShowTips::On => Some($crate::get_random_tip()),
+                $crate::ShowTips::Off => None,
+                $crate::ShowTips::Random => $crate::random_tip_show(),
+            },
         }
-    };
+    }};
 }
 
 #[macro_export]
@@ -159,21 +167,29 @@ pub static ICON_MATRIX: [[&str; 2]; ICON_TYPES] = [
 pub struct Verbosity {
     pub level: VerbosityLevel,
     pub decorations: bool,
-    pub show_tips: bool,
-    pub display_tip: bool,
+    pub show_tips: ShowTips,
+    pub display_tip: Option<&'static str>,
 }
 
 impl Verbosity {
     pub fn is_silent(&self) -> bool {
         self.level == VerbosityLevel::Silent
     }
-
     pub fn normal() -> Self {
         Self {
             level: VerbosityLevel::Normal,
             decorations: true,
-            show_tips: true,
-            display_tip: false,
+            show_tips: ShowTips::Random, // Default to random tips
+            display_tip: random_tip_show(),
+        }
+    }
+
+    pub fn loud() -> Self {
+        Self {
+            level: VerbosityLevel::Loud,
+            decorations: true,
+            show_tips: ShowTips::On, // Always show tips in Loud mode
+            display_tip: random_tip_show(),
         }
     }
 
@@ -181,8 +197,16 @@ impl Verbosity {
         Self {
             level: VerbosityLevel::Silent,
             decorations: false,
-            show_tips: false,
-            display_tip: false,
+            show_tips: ShowTips::Off,
+            display_tip: None,
+        }
+    }
+    pub fn mute() -> Self {
+        Self {
+            level: VerbosityLevel::Mute,
+            decorations: false,
+            show_tips: ShowTips::Off,
+            display_tip: None,
         }
     }
 
@@ -198,7 +222,7 @@ impl Verbosity {
     }
 
     pub fn tip(&self, msg: Option<&str>) {
-        if !self.show_tips { return }
+        if self.show_tips == ShowTips::Off { return }
         if let Some(m) = msg {
             // We use Hint icon (💡) for tips
             let formatted = self.icon_format(AliasIcon::Hint, m);
@@ -239,6 +263,27 @@ impl Verbosity {
         if self.level == VerbosityLevel::Loud {
             println!("{}", self.icon_format(AliasIcon::Info, msg));
         }
+    }
+    pub fn property(&self, label: &str, value: &str, width: usize, wdf: (bool, bool, bool)) {
+        if self.level == VerbosityLevel::Mute { return; }
+
+        // Pad the label to the left, then the value
+        let line = format!("{:<label_width$}: {}", label, value, label_width = width);
+        let (w, d, f) = wdf;
+
+        // --- THE OPTIONAL LOGIC ---
+        // Only build the audit string if at least one state is true
+        let audit_block = if w || d || f {
+            let spacer = if self.decorations { "  " } else { " " };
+            let w_m = if w { self.get_icon_str(AliasIcon::Win32) } else { spacer };
+            let d_m = if d { self.get_icon_str(AliasIcon::Doskey) } else { spacer };
+            let f_m = if f { self.get_icon_str(AliasIcon::File)   } else { spacer };
+            format!(" [{}{}{}]", w_m, d_m, f_m)
+        } else {
+            String::new() // Return empty string if no audit info exists
+        };
+
+        println!("{}{}", line, audit_block);
     }
     pub fn align(&self, name: &str, value: &str, width: usize, wdf: (bool, bool, bool)) {
         if self.level == VerbosityLevel::Mute { return; }
@@ -293,8 +338,23 @@ impl ShowFeature {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ShowTips {
+    On,
+    Off,
+    Random,
+}
+impl ShowTips {
+    pub fn is_on(&self) -> bool {
+        matches!(self, Self::On)
+    }
+    pub fn random(&self) -> bool {
+        matches!(self, Self::Random)
+    }
+}
+
+
 pub type ShowIcons = ShowFeature;
-pub type ShowTips  = ShowFeature;
 pub type DisplayTip  = ShowFeature;
 
 #[derive(Debug, PartialEq, Clone)]
@@ -450,9 +510,9 @@ pub fn run<P: AliasProvider>(mut args: Vec<String>) -> Result<(), Box<dyn std::e
 
     // 5. Dispatch
     let result = dispatch::<P>(action, verbosity, &path);
-    if verbosity.display_tip {
+    if let Some(tip_text) = verbosity.display_tip {
         say!(verbosity, AliasIcon::None, "\n");
-        say!(verbosity, AliasIcon::Info, get_random_tip());
+        say!(verbosity, AliasIcon::Info, tip_text);
     }
     result
 }
@@ -701,7 +761,7 @@ pub fn open_editor(path: &Path, override_ed: Option<String>, verbosity: Verbosit
 }
 
 pub fn parse_alias_args(args: &[String]) -> (AliasAction, Verbosity, Option<PathBuf>) {
-    let mut voice = Verbosity::normal();
+    let mut voice = Verbosity::loud();
     let mut volatile = false;
     let mut force_case = false;
     let mut custom_path: Option<PathBuf> = None;
@@ -721,8 +781,8 @@ pub fn parse_alias_args(args: &[String]) -> (AliasAction, Verbosity, Option<Path
                 "--quiet"    => { voice.level = VerbosityLevel::Silent; voice.decorations = false; }
                 "--temp"     => volatile = true,
                 "--force"    => force_case = true,
-                "--tips"     => { voice.show_tips = true; voice.display_tip = true; },
-                "--no-tips"  => voice.show_tips = false,
+                "--tips"     => { voice.show_tips = ShowTips::On; voice.display_tip = Some(get_random_tip()); },
+                "--no-tips"  => voice.show_tips = ShowTips::Off,
                 "--icons"    => voice.decorations = true,
                 "--no-icons" => voice.decorations = false,
                 "--file"     => {
@@ -918,45 +978,33 @@ pub fn calculate_new_file_state(original_content: &str, name: &str, value: &str)
 
 // alias_lib/src/lib.rs
 
+
 pub fn render_diagnostics(report: DiagnosticReport, verbosity: Verbosity) {
     whisper!(verbosity, AliasIcon::Tools, "--- Alias Tool Diagnostics ---");
+    let w = 15; // Width for the label column
+    let none = (false, false, false);
 
     if let Some(p) = report.binary_path {
-        say!(verbosity, AliasIcon::Disk, "Binary Loc:    {}", p.display());
+        verbosity.property("Binary Loc", &p.to_string_lossy(), w, none);
     }
 
-    say!(verbosity, AliasIcon::File, "File Var:      {} = \"{}\"", ENV_ALIAS_FILE, report.env_file);
-    say!(verbosity, AliasIcon::Environment, "Env Var:       {} = \"{}\"", ENV_ALIAS_OPTS, report.env_opts);
-    say!(verbosity, AliasIcon::Path, "Resolved Path: {}", report.resolved_path.display());
+    verbosity.property("File Var", &report.env_file, w, none);
+    verbosity.property("Env Var", &report.env_opts, w, none);
+    verbosity.property("Resolved", &report.resolved_path.to_string_lossy(), w, none);
 
-    // Status logic centered in one place
     let file_status = if !report.file_exists {
-        text!(verbosity, AliasIcon::Fail, "MISSING OR INACCESSIBLE")
-    } else if report.is_readonly {
-        text!(verbosity, AliasIcon::Alert, "EXISTS (READ-ONLY)")
+        text!(verbosity, AliasIcon::Fail, "MISSING")
     } else {
-        text!(verbosity, AliasIcon::Ok, "EXISTS (WRITABLE)")
+        text!(verbosity, AliasIcon::Ok, "WRITABLE")
     };
-    say!(verbosity, AliasIcon::Disk, "File Status:   {}", file_status);
+    verbosity.property("File Status", &file_status, w, none);
 
     if report.drive_responsive {
-        say!(verbosity, AliasIcon::Ok, "Drive Status:  RESPONSIVE");
-    }
-
-    say!(verbosity, AliasIcon::None, " ");
-    say!(verbosity, AliasIcon::None, "Registry Check (AutoRun):");
-    match report.registry_status {
-        RegistryStatus::Synced => say!(verbosity, AliasIcon::Ok, "  Status:      SYNCED"),
-        RegistryStatus::Mismatch(val) => say!(verbosity, AliasIcon::Alert, "  Status:      MISMATCH (Found: {})", val),
-        RegistryStatus::NotFound => say!(verbosity, AliasIcon::Fail, "  Status:      NOT FOUND"),
-    }
-
-    if let Some(api) = report.api_status {
-        say!(verbosity, AliasIcon::Say, "Console Link:  {}", api);
+        // Here we use the icons to show "Win32, Doskey, File" are all happy
+        verbosity.property("Drive", "RESPONSIVE", w, none);
     }
 }
 
-// In alias_lib/src/io_utils.rs or similar
 pub fn is_drive_responsive(path: &Path) -> bool {
     // Attempt a tiny 1-byte read to verify the handle is actually alive
     std::fs::File::open(path).and_then(|mut f| {
@@ -1026,12 +1074,13 @@ fn get_random_tip() -> &'static str {
     ];
 
     use std::time::{SystemTime, UNIX_EPOCH};
-    let nanos = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
-    tips[(nanos % tips.len() as u128) as usize]
+    // let nanos = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
+    let seed = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0);
+    tips[(seed % tips.len() as u128) as usize]
 }
 
 pub fn random_tip_show() -> Option<&'static str> {
-    let seed = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    let seed = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0);
     if seed % 10 == 0 {
         return Some(get_random_tip());
     }
@@ -1051,7 +1100,6 @@ USAGE:
 
 "#);
     if let HelpMode::Short = mode {
-        verbosity.tip(random_tip_show());
         return
     }
     shout!(verbosity, AliasIcon::None, r#"
@@ -1084,5 +1132,5 @@ FLAGS:
         shout!(verbosity, "");
         shout!(verbosity, "CURRENT FILE: None (Set ALIAS_FILE to fix)");
     }
-    verbosity.tip(random_tip_show());
+//    verbosity.tip(random_tip_show());
 }
