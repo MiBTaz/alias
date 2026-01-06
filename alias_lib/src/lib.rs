@@ -28,6 +28,7 @@ macro_rules! voice {
             decorations: false,
             show_tips: $crate::ShowTips::Off,
             display_tip: None,
+            in_startup: false,
         }
     };
     // 2. General case
@@ -37,6 +38,7 @@ macro_rules! voice {
             level: $crate::VerbosityLevel::$level,
             decorations: $icons.is_on(),
             show_tips: tips_setting,
+            in_startup: false,
             // We store the OPTION of the tip string here, once.
             display_tip: match tips_setting {
                 $crate::ShowTips::On => Some($crate::get_random_tip()),
@@ -97,11 +99,53 @@ macro_rules! impl_voice_macro {
     };
 }
 
+#[macro_export]
+macro_rules! scream {
+    // system errors and logs via e
+    ($verbosity:expr, $err:expr) => {
+        Box::new($crate::AliasError {
+            message: $verbosity.icon_format($crate::AliasIcon::Fail, &$err.to_string()),
+            code: $err.raw_os_error().unwrap_or(1) as u8,
+        })
+    };
+    // This handles: (verbosity, ErrorCode::MissingName, "Error message")
+    ($verbosity:expr, $code:expr, $($arg:tt)+) => {
+        Box::new($crate::AliasError {
+            message: $verbosity.icon_format($crate::AliasIcon::Fail, &format!($($arg)+)),
+            code: $code as u8,
+        })
+    };
+}
+
+#[derive(Debug)]
+pub struct AliasError {
+    pub message: String,
+    pub code: u8,
+}
+
+impl std::fmt::Display for AliasError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.message)
+    }
+}
+
+impl std::error::Error for AliasError {}
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Ord, PartialOrd)]
+#[repr(u8)] // Ensures the enum is stored as a single byte
+pub enum ErrorCode {
+    Generic = 1,
+    Syntax = 2,
+    MissingFile = 3,
+    Registry = 5,
+    AccessDenied = 6,
+    MissingName = 7,
+}
+
 // Generate the suite
 impl_voice_macro!(say,     say,     Say,     $);
 impl_voice_macro!(whisper, whisper, Whisper, $);
 impl_voice_macro!(shout,   shout,   Shout,   $);
-impl_voice_macro!(scream,  scream,  Scream,  $);
+// impl_voice_macro!(scream,  scream,  Scream,  $);
 impl_voice_macro!(text,    text,    Text,    $);
 
 // --- Shared Constants ---
@@ -169,6 +213,7 @@ pub struct Verbosity {
     pub decorations: bool,
     pub show_tips: ShowTips,
     pub display_tip: Option<&'static str>,
+    pub in_startup: bool,
 }
 
 impl Verbosity {
@@ -181,6 +226,7 @@ impl Verbosity {
             decorations: true,
             show_tips: ShowTips::Random, // Default to random tips
             display_tip: random_tip_show(),
+            in_startup: false,
         }
     }
 
@@ -190,6 +236,7 @@ impl Verbosity {
             decorations: true,
             show_tips: ShowTips::On, // Always show tips in Loud mode
             display_tip: random_tip_show(),
+            in_startup: false,
         }
     }
 
@@ -199,6 +246,7 @@ impl Verbosity {
             decorations: false,
             show_tips: ShowTips::Off,
             display_tip: None,
+            in_startup: false,
         }
     }
     pub fn mute() -> Self {
@@ -207,6 +255,7 @@ impl Verbosity {
             decorations: false,
             show_tips: ShowTips::Off,
             display_tip: None,
+            in_startup: false,
         }
     }
 
@@ -412,17 +461,14 @@ pub trait AliasProvider {
     // --- 1. THE ATOMIC "HANDS" (Platform must implement these) ---
     fn raw_set_macro(name: &str, value: Option<&str>) -> io::Result<bool>;
     fn raw_reload_from_file(path: &Path) -> io::Result<()>;
-    fn get_all_aliases() -> Vec<(String, String)>;
+    fn get_all_aliases(verbosity: Verbosity) -> io::Result<Vec<(String, String)>>;
     fn write_autorun_registry(cmd: &str, v: Verbosity) -> io::Result<()>;
     fn read_autorun_registry() -> String;
-
     // --- 2. THE CENTRALIZED LOGIC (Default implementations) ---
-
-    /// Formerly logic_purge_ram
-    fn purge_ram_macros() -> io::Result<PurgeReport> {
+    fn purge_ram_macros(verbosity: Verbosity) -> io::Result<PurgeReport> {
         let mut report = PurgeReport::default();
         // Use Self:: to call the atomic hands
-        let before = Self::get_all_aliases();
+        let before = Self::get_all_aliases(verbosity)?;
 
         for (name, _) in &before {
             // We use raw_set_macro with None to delete
@@ -431,7 +477,7 @@ pub trait AliasProvider {
             }
         }
 
-        let after = Self::get_all_aliases();
+        let after = Self::get_all_aliases(verbosity)?;
         for (name, _) in after {
             if let Some(pos) = report.cleared.iter().position(|x| x == &name) {
                 report.cleared.remove(pos);
@@ -440,13 +486,11 @@ pub trait AliasProvider {
         }
         Ok(report)
     }
-
-    /// Formerly execute_full_reload
-    fn reload_full(path: &Path, verbosity: Verbosity) -> io::Result<()> {
+    fn reload_full(path: &Path, verbosity: Verbosity) -> Result<(), Box<dyn std::error::Error>> {
         // Call our own purge logic
-        Self::purge_ram_macros()?;
+        Self::purge_ram_macros(verbosity)?;
 
-        let content = std::fs::read_to_string(path)?;
+        let content = std::fs::read_to_string(path).map_err(|e| scream!(verbosity, e))?;
         let count = content.lines()
             .filter(|l| !l.trim().is_empty() && !l.trim().starts_with(';'))
             .count();
@@ -457,7 +501,6 @@ pub trait AliasProvider {
         say!(verbosity, AliasIcon::Success, "Reload: {} macros injected.", count);
         Ok(())
     }
-
     fn install_autorun(verbosity: Verbosity) -> io::Result<()> {
         let path = get_alias_path().ok_or_else(|| {
             io::Error::new(io::ErrorKind::NotFound, "No alias file found.")
@@ -468,12 +511,10 @@ pub trait AliasProvider {
 
         Self::write_autorun_registry(&our_cmd, verbosity)
     }
-
-    // These still need implementations or defaults
     fn query_alias(name: &str, verbosity: Verbosity) -> Vec<String>;
     fn set_alias(opts: SetOptions, path: &Path, verbosity: Verbosity) -> io::Result<()>;
-    fn run_diagnostics(path: &Path, verbosity: Verbosity);
-    fn alias_show_all(verbosity: Verbosity);
+    fn run_diagnostics(path: &Path, verbosity: Verbosity) -> Result<(), Box<dyn std::error::Error>>;
+    fn alias_show_all(verbosity: Verbosity) -> Result<(), Box<dyn std::error::Error>>;
 }
 
 #[cfg(test)]
@@ -485,7 +526,7 @@ pub fn get_alias_directory() -> Result<std::path::PathBuf, String> {
 
 // --- Main Runner ---
 pub fn run<P: AliasProvider>(mut args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
-    // 1. Handle ENV_ALIAS_OPTS injection
+    // 1. ENV Injection...
     if let Ok(opts) = env::var(ENV_ALIAS_OPTS) {
         let extra: Vec<String> = opts.split_whitespace()
             .map(String::from)
@@ -494,27 +535,42 @@ pub fn run<P: AliasProvider>(mut args: Vec<String>) -> Result<(), Box<dyn std::e
         args.splice(1..1, extra);
     }
 
-    // 2. Parse intent (Now handles --file and identifies ShowAll)
+    // 2. Parse intent
     let (action, verbosity, cli_path) = parse_alias_args(&args);
 
-    // 3. Resolve Path: Flag > Env > Default
-    let path = cli_path
-        .or_else(get_alias_path)
-            .ok_or(verbosity.icon_format(AliasIcon::Fail, "Error: No alias file found. Set ALIAS_FILE or use --file"))?;
+    // 3. Resolve Path: This needs to happen before dispatch
+    let path = cli_path.or_else(get_alias_path);
 
-    // 4. Special Case: If it's just "alias" (ShowAll), override verbosity to be clean
-    // This replaces your 'if args.len() == 1' logic
-    // if args.len() == 1 && action == AliasAction::ShowAll {
-    //     verbosity = voice!(Normal, ShowIcons::Off, ShowTips::Off);
-    // }
+    // --- THE "FIRST-CLASS" STARTUP DISPATCH ---
+    if verbosity.in_startup {
+        // We force a Reload action through the dispatcher first.
+        // Even if the user typed 'alias --startup some_cmd', we hydrate first.
+        if let Some(ref path) = path {
+            dispatch::<P>(AliasAction::Reload, verbosity, path)?;
+        }
+        // If the intended action was just a Reload (standalone --startup),
+        // we stop here. We've hydrated the shell, and we're done.
+        if action == AliasAction::Reload {
+            return Ok(());
+        }
+    }
+    // Now path has to be valid.
+    let path = match path {
+        Some(p) => p,
+        None => return Err(scream!(verbosity, ErrorCode::MissingFile, "Error: No alias file found.")),
+    };
+    // --- THE PRIMARY ACTION DISPATCH ---
+    // This handles the 'some_cmd' part if the user ran 'alias --startup some_cmd',
+    // or just the normal 'alias some_cmd' if they aren't in startup mode.
+    dispatch::<P>(action, verbosity, &path)?;
 
-    // 5. Dispatch
-    let result = dispatch::<P>(action, verbosity, &path);
+    // 5. Tips
     if let Some(tip_text) = verbosity.display_tip {
         say!(verbosity, AliasIcon::None, "\n");
         say!(verbosity, AliasIcon::Info, tip_text);
     }
-    result
+
+    Ok(())
 }
 
 pub fn dispatch<P: AliasProvider>(
@@ -525,13 +581,13 @@ pub fn dispatch<P: AliasProvider>(
     match action {
         AliasAction::Clear => {
             whisper!(verbosity, "Purging RAM macros...");
-            let report = P::purge_ram_macros()?;
+            let report = P::purge_ram_macros(verbosity)?;
             if !report.cleared.is_empty() {
                 say!(verbosity, AliasIcon::Info,"Removed {} aliases.", report.cleared.len());
             }
         }
         AliasAction::Reload => P::reload_full(path, verbosity)?,
-        AliasAction::ShowAll => P::alias_show_all(verbosity),
+        AliasAction::ShowAll => P::alias_show_all(verbosity)?,
         AliasAction::Query(term) => {
             for line in P::query_alias(&term, verbosity) {
                 verbosity.whisper(&line);
@@ -549,7 +605,7 @@ pub fn dispatch<P: AliasProvider>(
                 P::set_alias(opts, path, verbosity)?;
                 say!(verbosity, AliasIcon::Win32,"Removed alias {}", name);
             } else {
-                scream!(verbosity, "Error: need an alias to remove")
+                return Err(scream!(verbosity, ErrorCode::MissingName, "Error: need an alias to remove"));
             }
         }
         AliasAction::Remove(raw_name) => {
@@ -564,7 +620,7 @@ pub fn dispatch<P: AliasProvider>(
                 P::set_alias(opts, path, verbosity)?;
                 say!(verbosity, AliasIcon::File,"Removed alias {}", name);
             } else {
-                scream!(verbosity, "Error: need an alias to remove")
+                return Err(scream!(verbosity, ErrorCode::MissingName, "Error: need an alias to remove"));
             }
         }
         AliasAction::Set(opts) => P::set_alias(opts, path, verbosity)?, // Fixed Missing Arm
@@ -573,9 +629,9 @@ pub fn dispatch<P: AliasProvider>(
             P::reload_full(path, verbosity)?;
         }
         AliasAction::Which => {
-            P::alias_show_all(verbosity);
+            P::alias_show_all(verbosity)?;
             say!(verbosity, AliasIcon::None, "\n");
-            P::run_diagnostics(path, verbosity);
+            P::run_diagnostics(path, verbosity)?;
         },
         AliasAction::Setup => P::install_autorun(verbosity)?,
         AliasAction::Help => print_help(verbosity, HelpMode::Full, Some(path)),
@@ -613,13 +669,15 @@ pub fn mesh_logic(os_list: Vec<(String, String)>, file_list: Vec<(String, String
     mesh_list
 }
 
-pub fn perform_audit(os_pairs: Vec<(String, String)>, verbosity: Verbosity) {
-    let file_pairs = dump_alias_file();
+pub fn perform_audit(os_pairs: Vec<(String, String)>, verbosity: Verbosity) -> Result<(), Box<dyn std::error::Error>> {
+    let file_pairs = dump_alias_file(verbosity)?;
     let mesh = mesh_logic(os_pairs, file_pairs);
     display_audit(&mesh, verbosity);
+    Ok(())
 }
 
 pub fn display_audit(mesh_list: &[AliasEntryMesh], verbosity: Verbosity) {
+    let mut desync_detected = false;
     let max_len = mesh_list.iter()
         .map(|e| {
             let val = e.os_value.as_deref().unwrap_or("<MISSING>");
@@ -628,7 +686,16 @@ pub fn display_audit(mesh_list: &[AliasEntryMesh], verbosity: Verbosity) {
         .max().unwrap_or(20);
 
     for entry in mesh_list {
+        // 1. Check for corruption in the Name before alignment
+        let mut corruption_note = String::new();
+        if !is_valid_name(&entry.name) {
+            corruption_note = String::from(" !! CORRUPT: Alias contains illegal characters ");
+            desync_detected = true;
+        }
+
         let os_val = entry.os_value.as_deref().unwrap_or("");
+
+        // 2. Align the base entry
         verbosity.align(
             &entry.name,
             os_val,
@@ -636,11 +703,24 @@ pub fn display_audit(mesh_list: &[AliasEntryMesh], verbosity: Verbosity) {
             (entry.os_value.is_some(), false, entry.file_value.is_some())
         );
 
+        // 3. Print the corruption note if the name is illegal
+        if !corruption_note.is_empty() {
+            print!("{}", corruption_note);
+        }
+        println!(); // Ensure the line terminates if align doesn't
+
+        // 4. Check for standard value discrepancies
         if let (Some(os), Some(fi)) = (&entry.os_value, &entry.file_value) {
             if os != fi {
                 verbosity.shout(&format!("Desync for {}: File has '{}'", entry.name, fi));
+                desync_detected = true;
             }
         }
+    }
+
+    if desync_detected && verbosity.show_audit() {
+        say!(verbosity, AliasIcon::None, "\n");
+        say!(verbosity, AliasIcon::Info, "Tip: Run `alias --reload` to fix corrupted or out-of-sync macros.");
     }
 }
 
@@ -670,9 +750,22 @@ pub fn perform_triple_audit(
 
         let d_val = d_idx.map(|i| wrap_pairs.remove(i).1);
         let f_val = f_idx.map(|i| file_pairs.remove(i).1);
+        // Check for corruption BEFORE alignment
+        let mut corruption_note = String::new();
+        if !is_valid_name(&name) {
+            corruption_note = String::from(" !! CORRUPT: Alias contains illegal characters ");
+            desync_detected = true;
+        }
 
         // Align the base entry
         verbosity.align(&name, &w_val, max_len, (true, d_val.is_some(), f_val.is_some()));
+
+        if !corruption_note.is_empty() {
+            print!("{}", corruption_note);
+        }
+
+        // Align the base entry
+        // verbosity.align(&name, &w_val, max_len, (true, d_val.is_some(), f_val.is_some()));
 
         // Check for value discrepancies
         if let Some(dv) = d_val {
@@ -711,18 +804,42 @@ pub fn perform_triple_audit(
 
     // 5. Final Footer
     if desync_detected {
+        say!(verbosity, AliasIcon::None, "\n");
         say!(verbosity, AliasIcon::Info, "Tip: Out of sync? Run `alias --reload` to align RAM with your config file.");
     }
 }
 
 // --- Utility Functions ---
-
+// Progressively looser checks, can pick up anywhere in the chain
 pub fn is_valid_name(name: &str) -> bool {
+    // 1. Basic whitespace and emptiness checks
     if name.is_empty() || name.contains(' ') || name.trim() != name { return false; }
+
+    // 2. THE BLACKLIST: Reject notorious shell animals
+    // Includes quotes, colons (drive letters), carets (cmd escape), and redirections
+    let notorious_animals = ['"', '\'', ':', '^', '&', '|', '<', '>', '(', ')'];
+    if name.contains(&notorious_animals[..]) { return false; }
+
+    // 3. Ensure the first character isn't a digit or punctuation
+    // We allow alphabetic (including Kanji) or underscores
     let first = name.chars().next().unwrap();
-    first.is_alphabetic() || first == '_'
+    if  first.is_alphabetic() || first == '_' {
+        return is_valid_name_permissive(name);
+    }
+    false
 }
 
+// Broader match to more allow 2 bytes
+pub fn is_valid_name_permissive(name: &str) -> bool {
+    if name.is_empty() || name.contains(' ') || name.trim() != name { return false; }
+    let first = name.chars().next().unwrap();
+    if first.is_alphabetic() || first == '_' {
+         return is_valid_name_loose(name)
+    }
+    false
+}
+
+// very permissive
 pub fn is_valid_name_loose(name: &str) -> bool {
     if name.is_empty() { return false; }
     let first = name.chars().next().unwrap();
@@ -740,13 +857,19 @@ pub fn get_alias_path() -> Option<PathBuf> {
         .find(|p| p.parent().map_or(false, |parent| parent.exists()))
 }
 
-pub fn dump_alias_file() -> Vec<(String, String)> {
-    let Some(path) = get_alias_path() else { return vec![]; };
-    fs::read_to_string(path).unwrap_or_default()
-        .lines()
+pub fn dump_alias_file(verbosity: Verbosity) -> Result<Vec<(String, String)>, Box<dyn std::error::Error>> {
+    let path = get_alias_path().ok_or_else(|| {
+        scream!(verbosity, ErrorCode::MissingFile, "Could not locate the alias configuration file.")
+    })?;
+
+    let content = std::fs::read_to_string(path).map_err(|e| scream!(verbosity, e))?;
+
+    let pairs = content.lines()
         .filter(|line| !line.trim().is_empty() && !line.starts_with(';'))
         .filter_map(|line| line.split_once('=').map(|(n, v)| (n.to_string(), v.to_string())))
-        .collect()
+        .collect();
+
+    Ok(pairs)
 }
 
 pub fn open_editor(path: &Path, override_ed: Option<String>, verbosity: Verbosity) -> io::Result<()> {
@@ -778,6 +901,7 @@ pub fn parse_alias_args(args: &[String]) -> (AliasAction, Verbosity, Option<Path
         let low_arg = arg.to_lowercase();
         if low_arg.starts_with("--") {
             match low_arg.as_str() {
+                "--startup"  => {voice = voice!(Mute, Off, Off); voice.in_startup = true;}
                 "--quiet"    => { voice.level = VerbosityLevel::Silent; voice.decorations = false; }
                 "--temp"     => volatile = true,
                 "--force"    => force_case = true,
@@ -865,9 +989,9 @@ pub fn parse_alias_args(args: &[String]) -> (AliasAction, Verbosity, Option<Path
     }
 }
 
-pub fn update_disk_file(name: &str, value: &str, path: &Path) -> io::Result<()> {
+pub fn update_disk_file(verbosity: Verbosity, name: &str, value: &str, path: &Path) -> Result<(), Box<dyn std::error::Error>> {
     let mut pairs = if path.exists() {
-        parse_macro_file(path)
+        parse_macro_file(path, verbosity)?
     } else {
         Vec::new()
     };
@@ -887,24 +1011,31 @@ pub fn update_disk_file(name: &str, value: &str, path: &Path) -> io::Result<()> 
         for (n, v) in pairs {
             content.push_str(&format!("{}={}\n", n, v));
         }
-        fs::write(&tmp_path, content)?;
+        fs::write(&tmp_path, content).map_err(|e| scream!(verbosity, e))?;
     }
 
     // Atomic Rename: If this fails, the original file is untouched
-    fs::rename(&tmp_path, path)?;
+    fs::rename(&tmp_path, path).map_err(|e| scream!(verbosity, e))?;
 
     Ok(())
 }
 
-pub fn parse_macro_file(path: &Path) -> Vec<(String, String)> {
-    fs::read_to_string(path).unwrap_or_default()
-        .lines()
+pub fn parse_macro_file(path: &Path, verbosity: Verbosity) -> Result<Vec<(String, String)>, Box<dyn std::error::Error>> {
+    // 1. CATCH AT THE FOREFRONT
+    // Instead of unwrap_or_default, we map the error and percolate with '?'
+    let content = fs::read_to_string(path).map_err(|e| scream!(verbosity, e))?;
+
+    // 2. DATA TRANSFORMATION
+    let pairs = content.lines()
         .map(|l| l.trim())
         .filter(|l| !l.is_empty())
         .filter_map(|l| l.split_once('='))
         .filter(|(k, v)| is_valid_name(k.trim()) && !v.trim().is_empty())
         .map(|(k, v)| (k.trim().to_string(), v.trim().to_string()))
-        .collect()
+        .collect();
+
+    // 3. SUCCESS WRAP
+    Ok(pairs)
 }
 
 
@@ -920,12 +1051,12 @@ pub fn resolve_command(cmd: &str) -> Option<AliasAction> {
     }
 }
 
-pub fn query_alias_file(name: &str, path: &Path, mode: Verbosity) -> Vec<String> {
+pub fn query_alias_file(name: &str, path: &Path, verbosity: Verbosity) -> Result<Vec<String>, Box<dyn std::error::Error>> {
     let mut results = Vec::new();
     let search = format!("{}=", name.to_lowercase());
 
     // Read the file (The Source of Truth)
-    let content = std::fs::read_to_string(path).unwrap_or_default();
+    let content = std::fs::read_to_string(path).map_err(|e| scream!(verbosity, e))?;
 
     let found = content
         .lines()
@@ -933,12 +1064,12 @@ pub fn query_alias_file(name: &str, path: &Path, mode: Verbosity) -> Vec<String>
 
     if let Some(line) = found {
         results.push(line.to_string());
-    } else if !mode.is_silent() {
+    } else if !verbosity.is_silent() {
         // Only push the "Not Known" message if we aren't in Silent/DataOnly mode
         results.push(format!("{} is not a known alias in the config file.", name));
     }
 
-    results
+    Ok(results)
 }
 
 pub fn is_path_healthy(path: &Path) -> bool {
@@ -1029,7 +1160,7 @@ pub fn perform_autorun_install<P: AliasProvider>(
 }
 
 
-fn get_random_tip() -> &'static str {
+pub fn get_random_tip() -> &'static str {
     let tips = [
         "Tired of Notepad? Set 'EDITOR=code' in your env to use VS Code for --edalias.",
         "Tired of Notepad? Set 'VISUAL=code' in your env to use VS Code for --edalias.",

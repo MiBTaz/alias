@@ -18,7 +18,7 @@ fn test_wrapper_strike_direct() {
     };
 
     // FIX: Call via the Interface 'P'
-    P::set_alias(opts, &path, voice!(Silent, ShowFeature::Off, Off)).expect("Wrapper strike failed");
+    P::set_alias(opts, &path, voice!(Silent, ShowFeature::Off, ShowTips::Off)).expect("Wrapper strike failed");
 
     // FIX: Add explicit type &String to the closure
     let results = P::query_alias("local_test", voice!(Silent, Off, Off));

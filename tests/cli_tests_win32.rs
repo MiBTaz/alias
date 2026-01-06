@@ -37,7 +37,7 @@ fn test_win32_international_roundtrip_repeat() {
     let name = "λ_alias";
     let val = "echo lambda_power";
     assert!(P::raw_set_macro(name, Some(val)).unwrap());
-    let all = P::get_all_aliases();
+    let all = P::get_all_aliases(voice!(Silent, Off, Off)).unwrap(); // Add .unwrap()
     let found = all.iter().find(|(n, _)| n == name);
     assert!(found.is_some());
     assert_eq!(found.unwrap().1, val);

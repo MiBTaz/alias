@@ -1,3 +1,5 @@
+// alias_hybrid/src/lib.rs
+
 use std::io;
 use std::path::Path;
 use alias_lib::*;
@@ -10,27 +12,48 @@ impl AliasProvider for HybridLibraryInterface {
     // --- 1. THE ATOMIC "HANDS" ---
 
     fn raw_set_macro(name: &str, value: Option<&str>) -> io::Result<bool> {
-        // Try Win32 API first, fallback to Wrapper if API returns false
-        let success = Win32LibraryInterface::raw_set_macro(name, value)?;
-        if !success {
-            return WrapperLibraryInterface::raw_set_macro(name, value);
+        match Win32LibraryInterface::raw_set_macro(name, value) {
+            // 1. Success! Return immediately.
+            Ok(true) => Ok(true),
+
+            // 2. Win32 says "False" (it didn't work, but no crash). Try Wrapper.
+            Ok(false) => {
+                trace!("Win32 API returned false; attempting Wrapper fallback.");
+                WrapperLibraryInterface::raw_set_macro(name, value)
+            },
+
+            // 3. HARD ERROR: The Win32 API actually failed/errored out.
+            Err(e) => {
+                // Check if it's a "safe" error to ignore (like the API not being available)
+                // Otherwise, PERCOLATE the error up.
+                if e.kind() == io::ErrorKind::Unsupported {
+                    trace!("Win32 API Unsupported; falling back to Wrapper.");
+                    WrapperLibraryInterface::raw_set_macro(name, value)
+                } else {
+                    // Return the actual error so the user knows WHY it failed.
+                    Err(e)
+                }
+            }
         }
-        Ok(true)
     }
 
     fn raw_reload_from_file(path: &Path) -> io::Result<()> {
+        // Try native reload, fallback to process spawn if it fails
         if Win32LibraryInterface::raw_reload_from_file(path).is_err() {
             return WrapperLibraryInterface::raw_reload_from_file(path);
         }
         Ok(())
     }
 
-    fn get_all_aliases() -> Vec<(String, String)> {
-        let mut list = Win32LibraryInterface::get_all_aliases();
-        if list.is_empty() {
-            list = WrapperLibraryInterface::get_all_aliases();
+    fn get_all_aliases(verbosity: Verbosity) -> io::Result<Vec<(String, String)>> {
+        // If Win32 returns our "Alert String" (Error 203), try the wrapper.
+        let w32_res = Win32LibraryInterface::get_all_aliases(verbosity.clone())?;
+
+        // If the Win32 list only contains our Alert Message, it's "effectively" empty.
+        if w32_res.is_empty() || (w32_res.len() == 1 && w32_res[0].0.contains("found in Win32 RAM")) {
+            return WrapperLibraryInterface::get_all_aliases(verbosity);
         }
-        list
+        Ok(w32_res)
     }
 
     fn write_autorun_registry(cmd: &str, v: Verbosity) -> io::Result<()> {
@@ -41,45 +64,26 @@ impl AliasProvider for HybridLibraryInterface {
         Win32LibraryInterface::read_autorun_registry()
     }
 
-    // --- 2. THE CENTRALIZED LOGIC (Overriding Defaults for Hybrid Efficiency) ---
+    // --- 2. THE CENTRALIZED LOGIC ---
 
-    fn purge_ram_macros() -> io::Result<PurgeReport> {
-        let report = Win32LibraryInterface::purge_ram_macros()?;
-        if report.is_fully_clean() {
-            Ok(report)
-        } else {
-            // API missed something or failed; use the wrapper's aggressive nuke
-            WrapperLibraryInterface::purge_ram_macros()
+    fn purge_ram_macros(verbosity: Verbosity) -> io::Result<PurgeReport> {
+        let report = Win32LibraryInterface::purge_ram_macros(verbosity.clone())?;
+        // If report has failures, let the Wrapper try to finish the job
+        if !report.failed.is_empty() {
+            return WrapperLibraryInterface::purge_ram_macros(verbosity);
         }
+        Ok(report)
     }
-
-    fn reload_full(path: &Path, verbosity: Verbosity) -> io::Result<()> {
-        let _ = Self::purge_ram_macros();
-        let definitions = parse_macro_file(path);
-        let mut api_success_count = 0;
-
-        for (name, value) in &definitions {
-            if Win32LibraryInterface::raw_set_macro(name, Some(value)).unwrap_or(false) {
-                api_success_count += 1;
-            }
-        }
-
-        if api_success_count < definitions.len() {
-            shout!(verbosity, AliasIcon::Alert, "API missed {} macros. Running Fallback...", definitions.len() - api_success_count);
-            WrapperLibraryInterface::reload_full(path, verbosity)?;
-        } else {
-            whisper!(verbosity, AliasIcon::Success, "Hybrid Reload: {} macros via API.", api_success_count);
-        }
-        Ok(())
-    }
-
-    // Note: install_autorun is handled by the trait's default implementation
-    // using our atomic hands above, but you can override if needed.
 
     fn query_alias(name: &str, verbosity: Verbosity) -> Vec<String> {
-        let mut output = Win32LibraryInterface::query_alias(name, verbosity.clone());
-        if output.is_empty() {
-            output = WrapperLibraryInterface::query_alias(name, verbosity);
+        let output = Win32LibraryInterface::query_alias(name, verbosity.clone());
+
+        // If Win32 returns the "not found" alert, ask the wrapper
+        if output.get(0).map_or(false, |s| s.contains("not found") || s.contains("not a known alias")) {
+            let wrap_output = WrapperLibraryInterface::query_alias(name, verbosity);
+            if !wrap_output.is_empty() {
+                return wrap_output;
+            }
         }
         output
     }
@@ -88,10 +92,13 @@ impl AliasProvider for HybridLibraryInterface {
         let name = if opts.force_case { opts.name.clone() } else { opts.name.to_lowercase() };
         let val_opt = if opts.value.is_empty() { None } else { Some(opts.value.as_str()) };
 
-        if !Win32LibraryInterface::raw_set_macro(&name, val_opt).unwrap_or(false) {
+        // Attempt API strike first
+        if Win32LibraryInterface::raw_set_macro(&name, val_opt).is_err() {
             WrapperLibraryInterface::set_alias(opts.clone(), path, verbosity.clone())?;
         } else if !opts.volatile {
-            update_disk_file(&name, &opts.value, path)?;
+            // Update disk only if RAM strike was accepted and not volatile
+            update_disk_file(verbosity.clone(), &name, &opts.value, path)
+                .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
         }
 
         if opts.volatile {
@@ -100,17 +107,51 @@ impl AliasProvider for HybridLibraryInterface {
         Ok(())
     }
 
-    fn run_diagnostics(path: &Path, verbosity: Verbosity) {
-        // Hybrid diagnostics usually lean on the Win32 implementation for kernel info
-        Win32LibraryInterface::run_diagnostics(path, verbosity);
+    fn run_diagnostics(path: &Path, verbosity: Verbosity) -> Result<(), Box<dyn std::error::Error>> {
+        Win32LibraryInterface::run_diagnostics(path, verbosity)
     }
 
-    fn alias_show_all(verbosity: Verbosity) {
-        let w32 = Win32LibraryInterface::get_all_aliases();
-        let wrap = WrapperLibraryInterface::get_all_aliases();
-        let file = get_alias_path().map(|p| parse_macro_file(&p)).unwrap_or_default();
+    fn alias_show_all(verbosity: Verbosity) -> Result<(), Box<dyn std::error::Error>> {
+        // 1. Try Win32
+        let w32 = match Win32LibraryInterface::get_all_aliases(verbosity.clone()) {
+            Ok(list) => list,
+            Err(e) => {
+                // MAP: Convert Box<dyn Error> into a concrete io::Error
+                let io_err = std::io::Error::new(std::io::ErrorKind::Other, e.to_string());
+                let err_struct = scream!(verbosity, io_err);
+                shout!(verbosity, AliasIcon::Fail, "{}", err_struct.message);
+                Vec::new()
+            }
+        };
 
-        // MATCHING YOUR ORDER: verbosity, then the three source vectors
+        // 2. Try Wrapper
+        let wrap = match WrapperLibraryInterface::get_all_aliases(verbosity.clone()) {
+            Ok(list) => list,
+            Err(e) => {
+                let io_err = std::io::Error::new(std::io::ErrorKind::Other, e.to_string());
+                let err_struct = scream!(verbosity, io_err);
+                shout!(verbosity, AliasIcon::Fail, "{}", err_struct.message);
+                Vec::new()
+            }
+        };
+
+        // 3. Try File
+        let file = match get_alias_path() {
+            Some(p) => match parse_macro_file(&p, verbosity.clone()) {
+                Ok(list) => list,
+                Err(e) => {
+                    let io_err = std::io::Error::new(std::io::ErrorKind::Other, e.to_string());
+                    let err_struct = scream!(verbosity, io_err);
+                    shout!(verbosity, AliasIcon::Fail, "File Error: {}", err_struct.message);
+                    Vec::new()
+                }
+            },
+            None => Vec::new(),
+        };
+
+        // 4. Final Audit
         perform_triple_audit(verbosity, w32, wrap, file);
+
+        Ok(())
     }
 }

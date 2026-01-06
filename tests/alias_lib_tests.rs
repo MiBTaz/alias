@@ -22,7 +22,7 @@ impl AliasProvider for MockProvider {
     // 1. ATOMIC HANDS
     fn raw_set_macro(_: &str, _: Option<&str>) -> io::Result<bool> { Ok(true) }
     fn raw_reload_from_file(_: &Path) -> io::Result<()> { Ok(()) }
-    fn get_all_aliases() -> Vec<(String, String)> { vec![] }
+    fn get_all_aliases(_verbosity: Verbosity) -> io::Result<Vec<(String, String)>> { Ok(vec![]) }
     fn write_autorun_registry(_: &str, _: Verbosity) -> io::Result<()> { Ok(()) }
     fn read_autorun_registry() -> String { String::new() }
 
@@ -35,8 +35,10 @@ impl AliasProvider for MockProvider {
         Ok(())
     }
 
-    fn run_diagnostics(_: &Path, _: Verbosity) {}
-    fn alias_show_all(_: Verbosity) {}
+    fn run_diagnostics(_: &Path, _: Verbosity) -> Result<(), Box<dyn std::error::Error>> { Ok(()) }
+    fn alias_show_all(_: Verbosity) -> Result<(), Box<dyn std::error::Error>> {
+        Ok(())
+    }
 }
 
 
@@ -49,7 +51,7 @@ fn test_show_all() {
 
 #[test]
 fn test_query_alias() {
-    assert_eq!(parse_alias_args(&vec!["alias".into(), "ls".into()]), (AliasAction::Query("ls".into()), Verbosity::normal(), None));
+    assert_eq!(parse_alias_args(&vec!["alias".into(), "ls".into()]), (AliasAction::Query("ls".into()), Verbosity::loud(), None));
 }
 
 #[test]
@@ -208,9 +210,17 @@ fn test_shout_macro_execution() {
 }
 
 #[test]
-fn test_scream_macro_execution() {
+fn test_scream_macro_io_error() {
     let v = Verbosity::silent();
-    scream!(v, "Testing scream should be silent");
+
+    // Create a real IO error to trigger the 2-arg macro arm
+    let io_err = std::io::Error::new(std::io::ErrorKind::NotFound, "fake disk error");
+
+    // This calls the 2-arg arm: ($verbosity:expr, $err:expr)
+    let err_box = scream!(v, io_err);
+
+    assert_eq!(err_box.code, 1); // Default for non-os-coded errors
+    assert!(err_box.message.contains("fake disk error"));
 }
 
 #[test]
@@ -304,8 +314,9 @@ fn test_parse_macro_file_resilience() {
     let content = "a=1\n# comment\n\nb=2";
     let temp = env::temp_dir().join("test_res.doskey");
     fs::write(&temp, content).unwrap();
-    let res = parse_macro_file(&temp);
-    assert_eq!(res.len(), 2);
+    let res = parse_macro_file(&temp, voice!(Silent, Off, Off));
+    // assert_eq!(res.len(), 2);
+    assert_eq!(res.expect("Failed to parse macro file").len(), 2);
     fs::remove_file(temp).ok();
 }
 
@@ -478,4 +489,48 @@ fn test_parser_remove_routing() {
     } else {
         panic!("Expected AliasAction::Remove");
     }
+}
+
+#[test]
+fn test_scream_macro_execution() {
+    let v = Verbosity::silent();
+
+    // Execute and capture the result
+    let err_box = scream!(v, ErrorCode::MissingFile, "File {} not found", "test.doskey");
+
+    // ASSERT: Verify the custom error code was mapped correctly
+    assert_eq!(err_box.code, ErrorCode::MissingFile as u8);
+
+    // ASSERT: Verify the format strings were processed correctly
+    assert_eq!(err_box.message, "File test.doskey not found");
+}
+
+#[test]
+fn test_scream_macro_logical_assertion() {
+    let v = Verbosity::silent(); // Voice is silent...
+
+    // Execute 3-arg logical macro
+    let err = scream!(v, ErrorCode::Generic, "CRITICAL_FAILURE");
+
+    // ASSERT: Even if silent, the error object MUST contain the message
+    assert!(err.message.contains("CRITICAL_FAILURE"), "Scream must produce message even when silent");
+    assert_eq!(err.code, ErrorCode::Generic as u8);
+}
+
+#[test]
+fn test_scream_macro_io_assertion() {
+    let v = Verbosity::silent();
+
+    // Create a raw OS error (Code 5 = Access Denied)
+    let io_err = std::io::Error::from_raw_os_error(5);
+
+    // Execute 2-arg IO macro
+    let err = scream!(v, io_err);
+
+    // ASSERT: Check that it extracted the OS code 5
+    assert_eq!(err.code, 5, "Should have extracted OS error code 5");
+
+    // ASSERT: Check that the message is present
+    // (In Windows, code 5 will contain "Access is denied")
+    assert!(!err.message.is_empty(), "Scream message should not be empty");
 }
