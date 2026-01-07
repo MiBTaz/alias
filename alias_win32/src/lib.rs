@@ -42,48 +42,64 @@ pub struct Win32LibraryInterface;
 impl AliasProvider for Win32LibraryInterface {
     fn get_all_aliases(verbosity: Verbosity) -> io::Result<Vec<(String, String)>> {
         let exe_name = get_target_exe_wide();
+
         unsafe {
-            let len_bytes = GetConsoleAliasesLengthW(exe_name);
-            trace!("GetConsoleAliasesLengthW: {} bytes", len_bytes);
+            let mut len_bytes = GetConsoleAliasesLengthW(exe_name);
 
             if len_bytes == 0 {
                 let code = GetLastError();
-                trace!("Length was 0. LastError: {}", code);
-                // 203 = ERROR_ENVVAR_NOT_FOUND (Empty RAM)
+                // 203 = ERROR_ENVVAR_NOT_FOUND
                 if code == 203 || code == 0 {
-                    let msg = text!(verbosity, AliasIcon::Alert, "no macros (aliases) found in Win32 RAM.");
-                    trace!("Empty RAM detected (203/0). Returning alert tuple.");
+                    let msg = text!(verbosity, AliasIcon::Alert, "no macros found in Win32 RAM.");
                     return Ok(vec![(msg, String::new())]);
                 }
                 return Err(io::Error::new(io::ErrorKind::Other, format!("Kernel failed length query (Code {})", code)));
             }
 
-            let mut buffer = vec![0u16; (len_bytes / 2) as usize];
-            let read_bytes = GetConsoleAliasesW(buffer.as_mut_ptr(), len_bytes, exe_name);
-            trace!("GetConsoleAliasesW read {} bytes into buffer", read_bytes);
+            // Add padding to initial length to minimize re-allocations
+            len_bytes += 512;
 
-            if read_bytes == 0 {
-                let code = GetLastError();
-                trace!("Read was 0. LastError: {}", code);
-                if code == 203 {
-                    let msg = text!(verbosity, AliasIcon::Alert, "no macros (aliases) found in Win32 RAM.");
-                    return Ok(vec![(msg, String::new())]);
+            let mut buffer;
+            let mut read_bytes;
+
+            loop {
+                // Allocate u16 buffer (2 bytes per element)
+                buffer = vec![0u16; (len_bytes / 2) as usize];
+                read_bytes = GetConsoleAliasesW(buffer.as_mut_ptr(), len_bytes, exe_name);
+
+                if read_bytes > 0 {
+                    break; // We have the data
                 }
+
+                let code = GetLastError();
+                // 111 = Buffer Overflow, 122 = Insufficient Buffer
+                if code == 111 || code == 122 {
+                    len_bytes *= 2;
+                    if len_bytes > 1024 * 1024 { // 1MB Safety cap
+                        return Err(io::Error::new(io::ErrorKind::Other, "Win32 Alias buffer exceeded 1MB limit"));
+                    }
+                    continue;
+                }
+
                 return Err(io::Error::new(io::ErrorKind::Other, format!("Kernel failed buffer read (Code {})", code)));
             }
 
+            // Slice only the bytes actually read
             let wide_slice = &buffer[.. (read_bytes / 2) as usize];
+
             let list: Vec<(String, String)> = String::from_utf16_lossy(wide_slice)
-                .split('\0')
+                .split('\0') // Win32 separation
                 .filter_map(|line| {
-                    if line.trim().is_empty() { return None; }
+                    let trimmed = line.trim();
+                    if trimmed.is_empty() { return None; }
+
                     line.split_once('=').map(|(n, v)| {
+                        // Sanitization: Remove quotes so RAM matches Disk for the audit
                         (n.trim_matches('"').to_string(), v.trim_matches('"').to_string())
                     })
                 })
                 .collect();
 
-            trace!("Parsed {} aliases from RAM", list.len());
             Ok(list)
         }
     }

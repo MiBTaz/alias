@@ -1,9 +1,9 @@
 // alias_lib/src/lib.rs
 
-use std::env;
+use std::{env, fmt};
 use std::fs;
 use std::io;
-use std::io::Read;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -25,7 +25,7 @@ macro_rules! voice {
     ($level:ident, Off, Off) => {
         $crate::Verbosity {
             level: $crate::VerbosityLevel::$level,
-            decorations: false,
+            show_icons: $crate::ShowIcons::Off,
             show_tips: $crate::ShowTips::Off,
             display_tip: None,
             in_startup: false,
@@ -34,9 +34,10 @@ macro_rules! voice {
     // 2. General case
     ($level:ident, $icons:expr, $tips:expr) => {{
         let tips_setting = $tips;
+        let icons_setting = $icons;
         $crate::Verbosity {
             level: $crate::VerbosityLevel::$level,
-            decorations: $icons.is_on(),
+            show_icons: icons_setting,
             show_tips: tips_setting,
             in_startup: false,
             // We store the OPTION of the tip string here, once.
@@ -59,8 +60,6 @@ macro_rules! to_bool {
     (ShowIcons::Off) => { false };
     (ShowTips::On) => { true };
     (ShowTips::Off) => { false };
-    (DisplayTip::On) => { true };
-    (DisplayTip::Off) => { false };
     (ShowFeature::On) => { true };
     (ShowFeature::Off) => { false };
     ($val:expr) => { $val.is_on() };
@@ -98,9 +97,16 @@ macro_rules! impl_voice_macro {
         }
     };
 }
+// Generate the suite
+impl_voice_macro!(say,     say,     Say,     $);
+impl_voice_macro!(whisper, whisper, Whisper, $);
+impl_voice_macro!(shout,   shout,   Shout,   $);
+impl_voice_macro!(scream,  scream,  Scream,  $);
+impl_voice_macro!(text,    text,    Text,    $);
+
 
 #[macro_export]
-macro_rules! scream {
+macro_rules! failure {
     // system errors and logs via e
     ($verbosity:expr, $err:expr) => {
         Box::new($crate::AliasError {
@@ -141,12 +147,51 @@ pub enum ErrorCode {
     MissingName = 7,
 }
 
-// Generate the suite
-impl_voice_macro!(say,     say,     Say,     $);
-impl_voice_macro!(whisper, whisper, Whisper, $);
-impl_voice_macro!(shout,   shout,   Shout,   $);
-// impl_voice_macro!(scream,  scream,  Scream,  $);
-impl_voice_macro!(text,    text,    Text,    $);
+#[derive(Debug, Clone)]
+pub struct Task {
+    pub action: AliasAction,
+}
+
+pub struct TaskQueue {
+    tasks: Vec<Task>,
+}
+
+impl TaskQueue {
+    pub fn new() -> Self {
+        Self {
+            tasks: Vec::with_capacity(4),
+        }
+    }
+
+    pub fn push(&mut self, action: AliasAction) {
+        self.tasks.push(Task { action });
+    }
+
+    pub fn clear(&mut self) {
+        self.tasks.clear();
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.tasks.is_empty()
+    }
+
+    pub fn len(&self) -> usize {
+        self.tasks.len()
+    }
+
+    pub fn get(&self, index: usize) -> Option<&Task> {
+        self.tasks.get(index)
+    }
+}
+
+impl IntoIterator for TaskQueue {
+    type Item = Task;
+    type IntoIter = std::vec::IntoIter<Self::Item>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.tasks.into_iter()
+    }
+}
 
 // --- Shared Constants ---
 pub const ENV_ALIAS_FILE: &str = "ALIAS_FILE";
@@ -174,10 +219,10 @@ pub enum VerbosityLevel {
 #[derive(Debug, Clone, Copy)]
 #[repr(usize)]
 pub enum AliasIcon {
-    None    = 0,  Win32 = 1,  Doskey = 2,  Disk        = 3,  Alert = 4,
-    Success = 5,  Info  = 6,  Say    = 7,  Whisper     = 8,  Shout = 9,
-    Scream  = 10, Fail  = 11, Hint   = 12, Environment = 13, Ok    = 14,
-    Tools   = 15, File  = 16, Path   = 17, Text        = 18,
+    None    = 0,  Win32 = 1,  Doskey = 2,  Disk        = 3,  Alert    = 4,
+    Success = 5,  Info  = 6,  Say    = 7,  Whisper     = 8,  Shout    = 9,
+    Scream  = 10, Fail  = 11, Hint   = 12, Environment = 13, Ok       = 14,
+    Tools   = 15, File  = 16, Path   = 17, Text        = 18, Question = 19,
     _VariantCount,
 }
 
@@ -203,14 +248,14 @@ pub static ICON_MATRIX: [[&str; 2]; ICON_TYPES] = [
     ["F",  "📁"], // File
     ["P",  "🛣️"], // Path
     ["T",  "️💬"], // Text
-
+    ["?",  "🤔"], // Question
 ];
 
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Verbosity {
     pub level: VerbosityLevel,
-    pub decorations: bool,
+    pub show_icons: ShowIcons,
     pub show_tips: ShowTips,
     pub display_tip: Option<&'static str>,
     pub in_startup: bool,
@@ -223,7 +268,7 @@ impl Verbosity {
     pub fn normal() -> Self {
         Self {
             level: VerbosityLevel::Normal,
-            decorations: true,
+            show_icons: ShowFeature::On,
             show_tips: ShowTips::Random, // Default to random tips
             display_tip: random_tip_show(),
             in_startup: false,
@@ -233,7 +278,7 @@ impl Verbosity {
     pub fn loud() -> Self {
         Self {
             level: VerbosityLevel::Loud,
-            decorations: true,
+            show_icons: ShowFeature::On,
             show_tips: ShowTips::On, // Always show tips in Loud mode
             display_tip: random_tip_show(),
             in_startup: false,
@@ -243,7 +288,7 @@ impl Verbosity {
     pub fn silent() -> Self {
         Self {
             level: VerbosityLevel::Silent,
-            decorations: false,
+            show_icons: ShowFeature::Off,
             show_tips: ShowTips::Off,
             display_tip: None,
             in_startup: false,
@@ -252,7 +297,7 @@ impl Verbosity {
     pub fn mute() -> Self {
         Self {
             level: VerbosityLevel::Mute,
-            decorations: false,
+            show_icons: ShowFeature::Off,
             show_tips: ShowTips::Off,
             display_tip: None,
             in_startup: false,
@@ -260,11 +305,11 @@ impl Verbosity {
     }
 
     pub fn get_icon_str(&self, id: AliasIcon) -> &'static str {
-        ICON_MATRIX[id as usize][self.decorations as usize]
+        ICON_MATRIX[id as usize][self.show_icons as usize]
     }
 
     pub fn icon_format(&self, icon: AliasIcon, msg: &str) -> String {
-        if !self.decorations || msg.is_empty() {
+        if !self.show_icons.is_on() || msg.is_empty() {
             return msg.to_string();
         }
         format!("{} {}", self.get_icon_str(icon), msg)
@@ -280,7 +325,7 @@ impl Verbosity {
         }
     }
     pub fn show_audit(&self) -> bool { self.level >= VerbosityLevel::Normal }
-    pub fn show_xmas_lights(&self) -> bool { self.decorations && self.show_audit() }
+    pub fn show_xmas_lights(&self) -> bool { self.show_icons.is_on() && self.show_audit() }
 
     pub fn text(&self, msg: &str) -> String {
         msg.to_string()
@@ -323,7 +368,7 @@ impl Verbosity {
         // --- THE OPTIONAL LOGIC ---
         // Only build the audit string if at least one state is true
         let audit_block = if w || d || f {
-            let spacer = if self.decorations { "  " } else { " " };
+            let spacer = if self.show_icons.is_on() { "  " } else { " " };
             let w_m = if w { self.get_icon_str(AliasIcon::Win32) } else { spacer };
             let d_m = if d { self.get_icon_str(AliasIcon::Doskey) } else { spacer };
             let f_m = if f { self.get_icon_str(AliasIcon::File)   } else { spacer };
@@ -342,9 +387,9 @@ impl Verbosity {
         let (w, d, f) = wdf;
 
         // --- THE FIX ---
-        // Emojis (decorations) occupy 2 terminal columns.
+        // Emojis (show_icons) occupy 2 terminal columns.
         // ASCII letters/spaces occupy 1.
-        let spacer = if self.decorations { "  " } else { " " };
+        let spacer = if self.show_icons.is_on() { "  " } else { " " };
 
         let w_m = if w { self.get_icon_str(AliasIcon::Win32) } else { spacer };
         let d_m = if d { self.get_icon_str(AliasIcon::Doskey) } else { spacer };
@@ -375,15 +420,49 @@ pub enum AliasAction {
     Invalid,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+impl fmt::Display for AliasAction {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Invalid => write!(f, "Unrecognized or malformed command"),
+            Self::Set(opts) => write!(f, "Set alias: {}", opts.name),
+            Self::Remove(name) => write!(f, "Remove alias: {}", name),
+            Self::Reload => write!(f, "Reload configuration"),
+            Self::Query(name) => write!(f, "Querying alias {}: ", name),
+            Self::Edit(path) => match path {
+                Some(exe) => write!(f, "Editing alias file with: {}", exe),
+                None => write!(f, "Editing alias file with default editor"),
+            },
+            Self::Unalias(alias) => write!(f, "Set alias: {}", alias),
+            Self::Clear => write!(f, "Clear aliases"),
+            Self::Help => write!(f, "Display help"),
+            Self::Setup => write!(f, "Setup autorun registry entry"),
+            Self::ShowAll => write!(f, "Show all aliases"),
+            Self::Which => write!(f, "Run diagnostics"),
+//            _ => write!(f, "Unknown action"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Ord, PartialOrd, Eq, Hash)]
 pub enum ShowFeature {
-    On,
-    Off,
+    On = 1,
+    Off = 0,
 }
 
 impl ShowFeature {
     pub fn is_on(&self) -> bool {
         matches!(self, Self::On)
+    }
+}
+
+impl std::ops::Not for ShowFeature {
+    type Output = Self;
+
+    fn not(self) -> Self::Output {
+        match self {
+            Self::On => Self::Off,
+            Self::Off => Self::On,
+        }
     }
 }
 
@@ -490,7 +569,7 @@ pub trait AliasProvider {
         // Call our own purge logic
         Self::purge_ram_macros(verbosity)?;
 
-        let content = std::fs::read_to_string(path).map_err(|e| scream!(verbosity, e))?;
+        let content = std::fs::read_to_string(path).map_err(|e| failure!(verbosity, e))?;
         let count = content.lines()
             .filter(|l| !l.trim().is_empty() && !l.trim().starts_with(';'))
             .count();
@@ -502,15 +581,52 @@ pub trait AliasProvider {
         Ok(())
     }
     fn install_autorun(verbosity: Verbosity) -> io::Result<()> {
-        let path = get_alias_path().ok_or_else(|| {
-            io::Error::new(io::ErrorKind::NotFound, "No alias file found.")
-        })?;
+        // 1. Check for the Global Source of Truth (Env Var)
+        let env_var = std::env::var("ALIAS_FILE").ok();
+        let mut startup_args = String::from("--startup");
 
+        // We check this now to see if we need to ask the user for a path
+        if let Some(path) = env_var {
+            say!(verbosity, AliasIcon::Info, "Detected ALIAS_FILE in environment: {}", path);
+            // Env is present, so the AutoRun command stays lean: "alias.exe --startup"
+        } else {
+            say!(verbosity, AliasIcon::Question, "ALIAS_FILE environment variable not found.");
+
+            // 2. Interactive Prompt
+            print!("  > Enter path to store aliases (leave blank for default): ");
+            let _ = std::io::stdout().flush();
+            let mut input = String::new();
+            std::io::stdin().read_line(&mut input)?;
+            let input = input.trim();
+
+            if !input.is_empty() {
+                let path = PathBuf::from(input);
+
+                // 3. Validation & Creation (The 0-byte Touch)
+                if !path.exists() {
+                    std::fs::File::create(&path)?;
+                    say!(verbosity, AliasIcon::File, "Created new alias file: {}", path.display());
+                }
+
+                // Canonicalize so the Registry doesn't get a relative path like ".\ali.txt"
+                let abs_path = std::fs::canonicalize(&path).unwrap_or(path);
+
+                // Explicitly bake the file path into the AutoRun command
+                startup_args = format!("--file \"{}\" --startup", abs_path.display());
+            } else {
+                // Defaulting logic (e.g., %USERPROFILE%\.aliases.txt)
+                say!(verbosity, AliasIcon::Info, "Proceeding with default path resolution.");
+            }
+        }
+
+        // 4. Construct the Final Command
         let exe_path = std::env::current_exe()?;
-        let our_cmd = format!("\"{}\" --reload --file \"{}\"", exe_path.display(), path.display());
+        let our_cmd = format!("\"{}\" {}", exe_path.display(), startup_args);
 
+        // 5. Final Write
         Self::write_autorun_registry(&our_cmd, verbosity)
     }
+
     fn query_alias(name: &str, verbosity: Verbosity) -> Vec<String>;
     fn set_alias(opts: SetOptions, path: &Path, verbosity: Verbosity) -> io::Result<()>;
     fn run_diagnostics(path: &Path, verbosity: Verbosity) -> Result<(), Box<dyn std::error::Error>>;
@@ -526,45 +642,50 @@ pub fn get_alias_directory() -> Result<std::path::PathBuf, String> {
 
 // --- Main Runner ---
 pub fn run<P: AliasProvider>(mut args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
-    // 1. ENV Injection...
+    // 1. ENV Injection (Standard)
     if let Ok(opts) = env::var(ENV_ALIAS_OPTS) {
         let extra: Vec<String> = opts.split_whitespace()
             .map(String::from)
-            .filter(|opt| matches!(opt.as_str(), "--quiet" | "--temp" | "--force"))
+            .filter(|opt| matches!(opt.as_str(),
+              "--quiet" | "--temp" | "--tips" | "--no-tips" | "--icons" | "--no-icons" | "--force"))
             .collect();
         args.splice(1..1, extra);
     }
 
-    // 2. Parse intent
-    let (action, verbosity, cli_path) = parse_alias_args(&args);
+    // 2. Parse intent (The TaskQueue + Voice)
+    let (mut queue, verbosity, cli_path) = parse_arguments(&args);
 
-    // 3. Resolve Path: This needs to happen before dispatch
-    let path = cli_path.or_else(get_alias_path);
+    // 3. Resolve Path
+    let path = cli_path.or_else(get_alias_path).ok_or_else(|| {
+        failure!(verbosity, ErrorCode::MissingFile, "Error: No alias file found.")
+    })?;
 
-    // --- THE "FIRST-CLASS" STARTUP DISPATCH ---
+    // 4. THE STARTUP HYDRATION
+    // If the shell is just waking up, we MUST pull from disk.
     if verbosity.in_startup {
-        // We force a Reload action through the dispatcher first.
-        // Even if the user typed 'alias --startup some_cmd', we hydrate first.
-        if let Some(ref path) = path {
-            dispatch::<P>(AliasAction::Reload, verbosity, path)?;
-        }
-        // If the intended action was just a Reload (standalone --startup),
-        // we stop here. We've hydrated the shell, and we're done.
-        if action == AliasAction::Reload {
+        // We dispatch Reload immediately. This fills the RAM from your .txt file.
+        // We use the provider <P> to ensure it's the real Win32 logic.
+        dispatch::<P>(AliasAction::Reload, verbosity.clone(), &path)?;
+
+        // If the ONLY thing the user typed was '--startup',
+        // we're done. No need for ShowAll.
+        if queue.is_empty() {
             return Ok(());
         }
     }
-    // Now path has to be valid.
-    let path = match path {
-        Some(p) => p,
-        None => return Err(scream!(verbosity, ErrorCode::MissingFile, "Error: No alias file found.")),
-    };
-    // --- THE PRIMARY ACTION DISPATCH ---
-    // This handles the 'some_cmd' part if the user ran 'alias --startup some_cmd',
-    // or just the normal 'alias some_cmd' if they aren't in startup mode.
-    dispatch::<P>(action, verbosity, &path)?;
 
-    // 5. Tips
+    // 5. THE FALLBACK (Non-startup empty call)
+    if queue.is_empty() {
+        queue.push(AliasAction::ShowAll);
+    }
+
+    // 6. EXECUTION LOOP
+    // Now we process whatever else was in the queue (like that xcd=dir payload)
+    for task in queue {
+        dispatch::<P>(task.action, verbosity.clone(), &path)?;
+    }
+
+    // 7. Success Tip
     if let Some(tip_text) = verbosity.display_tip {
         say!(verbosity, AliasIcon::None, "\n");
         say!(verbosity, AliasIcon::Info, tip_text);
@@ -605,7 +726,7 @@ pub fn dispatch<P: AliasProvider>(
                 P::set_alias(opts, path, verbosity)?;
                 say!(verbosity, AliasIcon::Win32,"Removed alias {}", name);
             } else {
-                return Err(scream!(verbosity, ErrorCode::MissingName, "Error: need an alias to remove"));
+                return Err(failure!(verbosity, ErrorCode::MissingName, "Error: need an alias to remove"));
             }
         }
         AliasAction::Remove(raw_name) => {
@@ -620,7 +741,7 @@ pub fn dispatch<P: AliasProvider>(
                 P::set_alias(opts, path, verbosity)?;
                 say!(verbosity, AliasIcon::File,"Removed alias {}", name);
             } else {
-                return Err(scream!(verbosity, ErrorCode::MissingName, "Error: need an alias to remove"));
+                return Err(failure!(verbosity, ErrorCode::MissingName, "Error: need an alias to remove"));
             }
         }
         AliasAction::Set(opts) => P::set_alias(opts, path, verbosity)?, // Fixed Missing Arm
@@ -636,7 +757,7 @@ pub fn dispatch<P: AliasProvider>(
         AliasAction::Setup => P::install_autorun(verbosity)?,
         AliasAction::Help => print_help(verbosity, HelpMode::Full, Some(path)),
         AliasAction::Invalid => {
-            verbosity.scream("Invalid command.");
+            scream!(verbosity, AliasIcon::Fail, "Invalid command: {}", AliasAction::Invalid);
             print_help(verbosity, HelpMode::Short, Some(path));
         }
     }
@@ -859,10 +980,10 @@ pub fn get_alias_path() -> Option<PathBuf> {
 
 pub fn dump_alias_file(verbosity: Verbosity) -> Result<Vec<(String, String)>, Box<dyn std::error::Error>> {
     let path = get_alias_path().ok_or_else(|| {
-        scream!(verbosity, ErrorCode::MissingFile, "Could not locate the alias configuration file.")
+        failure!(verbosity, ErrorCode::MissingFile, "Could not locate the alias configuration file.")
     })?;
 
-    let content = std::fs::read_to_string(path).map_err(|e| scream!(verbosity, e))?;
+    let content = std::fs::read_to_string(path).map_err(|e| failure!(verbosity, e))?;
 
     let pairs = content.lines()
         .filter(|line| !line.trim().is_empty() && !line.starts_with(';'))
@@ -902,13 +1023,13 @@ pub fn parse_alias_args(args: &[String]) -> (AliasAction, Verbosity, Option<Path
         if low_arg.starts_with("--") {
             match low_arg.as_str() {
                 "--startup"  => {voice = voice!(Mute, Off, Off); voice.in_startup = true;}
-                "--quiet"    => { voice.level = VerbosityLevel::Silent; voice.decorations = false; }
+                "--quiet"    => { voice.level = VerbosityLevel::Silent; voice.show_icons = ShowFeature::Off; }
                 "--temp"     => volatile = true,
                 "--force"    => force_case = true,
                 "--tips"     => { voice.show_tips = ShowTips::On; voice.display_tip = Some(get_random_tip()); },
                 "--no-tips"  => voice.show_tips = ShowTips::Off,
-                "--icons"    => voice.decorations = true,
-                "--no-icons" => voice.decorations = false,
+                "--icons"    => voice.show_icons = ShowFeature::On,
+                "--no-icons" => voice.show_icons = ShowFeature::Off,
                 "--file"     => {
                     if let Some(path_str) = args.get(i + 1) {
                         custom_path = Some(PathBuf::from(path_str));
@@ -989,6 +1110,112 @@ pub fn parse_alias_args(args: &[String]) -> (AliasAction, Verbosity, Option<Path
     }
 }
 
+pub fn parse_arguments(args: &[String]) -> (TaskQueue, Verbosity, Option<PathBuf>) {
+    let mut queue = TaskQueue::new();
+    let mut voice = Verbosity::loud();
+    let mut custom_path: Option<PathBuf> = None;
+    let mut volatile = false;
+    let mut force_case = false;
+    let mut pivot_index = args.len();
+    let mut skip_next = false;
+
+    // --- STEP 1: FLAG HARVESTING ---
+    for (i, arg) in args.iter().enumerate().skip(1) {
+        if skip_next { skip_next = false; continue; }
+
+        let low_arg = arg.to_lowercase();
+        match low_arg.as_str() {
+            // the punch out
+            "--help" => {
+                queue.clear();
+                queue.push(AliasAction::Help);
+                return (queue, voice, custom_path);
+            }
+            // Configs
+            "--startup"  => { voice = voice!(Mute, Off, Off); voice.in_startup = true; }
+            "--quiet"    => { voice.level = VerbosityLevel::Silent; voice.show_icons = ShowFeature::Off; }
+            "--temp"     => volatile = true,
+            "--force"    => force_case = true,
+            "--tips"     => { voice.show_tips = ShowTips::On; voice.display_tip = Some(get_random_tip()); },
+            "--no-tips"  => voice.show_tips = ShowTips::Off,
+            "--icons"    => voice.show_icons = ShowFeature::On,
+            "--no-icons" => voice.show_icons = ShowFeature::Off,
+            "--file"     => {
+                if let Some(path_str) = args.get(i + 1) {
+                    custom_path = Some(PathBuf::from(path_str));
+                    skip_next = true;
+                    pivot_index = i + 2;
+                } else {
+                    scream!(voice, AliasIcon::Alert, "--file requires a path");
+                    pivot_index = i + 1;
+                }
+            }
+            // Actions
+            // Inside Step 1 match block
+            "--edalias" | "--edaliases" => {
+                let editor = arg.split_once('=').map(|(_, ed)| ed.to_string());
+                queue.push(AliasAction::Edit(editor));
+                pivot_index = i + 1;
+            }
+            "--reload" => { queue.push(AliasAction::Reload); pivot_index = i + 1; }
+            "--which"  => { queue.push(AliasAction::Which);  pivot_index = i + 1; }
+            "--unalias" | "--remove" => {
+                if let Some(target) = args.get(i + 1) {
+                    if is_valid_name(target) {
+                        let action = if low_arg == "--remove" { AliasAction::Remove(target.clone()) }
+                        else { AliasAction::Unalias(target.clone()) };
+                        queue.push(action);
+                    } else {
+                        scream!(voice, AliasIcon::Alert, "Invalid name: '{}'", target);
+                    }
+                    skip_next = true;
+                    pivot_index = i + 2;
+                }
+            }
+            // THE PIVOT BRANCH
+            _ => {
+                if arg.starts_with("--") {
+                    scream!(voice, AliasIcon::Alert, "Unknown option: {}", arg);
+                    continue; // Skip typo, keep looking
+                }
+
+                // If it's a naked string, check if the "Name" part is valid
+                let potential_name = arg.split('=').next().unwrap_or(arg);
+                if is_valid_name(potential_name) {
+                    pivot_index = i; // Valid start of command!
+                    break;
+                } else {
+                    scream!(voice, AliasIcon::Alert, "Illegal command start: '{}'", arg);
+                    queue.push(AliasAction::Invalid);
+                    continue;
+                }
+            }
+        }
+    }
+
+    // --- STEP 2: PAYLOAD HARVESTING ---
+    let f_args = &args[pivot_index..];
+    if !f_args.is_empty() {
+        let raw_line = f_args.join(" ");
+        if let Some((n, v)) = raw_line.split_once('=') {
+            let name = n.trim();
+            if is_valid_name(name) {
+                queue.push(AliasAction::Set(SetOptions {
+                    name: name.to_string(),
+                    value: v.to_string(), // 59-byte literal preservation
+                    volatile,
+                    force_case,
+                }));
+            }
+        } else {
+            queue.push(AliasAction::Query(f_args[0].clone()));
+        }
+    }
+
+    (queue, voice, custom_path)
+}
+
+
 pub fn update_disk_file(verbosity: Verbosity, name: &str, value: &str, path: &Path) -> Result<(), Box<dyn std::error::Error>> {
     let mut pairs = if path.exists() {
         parse_macro_file(path, verbosity)?
@@ -1011,33 +1238,30 @@ pub fn update_disk_file(verbosity: Verbosity, name: &str, value: &str, path: &Pa
         for (n, v) in pairs {
             content.push_str(&format!("{}={}\n", n, v));
         }
-        fs::write(&tmp_path, content).map_err(|e| scream!(verbosity, e))?;
+        fs::write(&tmp_path, content).map_err(|e| failure!(verbosity, e))?;
     }
 
     // Atomic Rename: If this fails, the original file is untouched
-    fs::rename(&tmp_path, path).map_err(|e| scream!(verbosity, e))?;
+    fs::rename(&tmp_path, path).map_err(|e| failure!(verbosity, e))?;
 
     Ok(())
 }
 
 pub fn parse_macro_file(path: &Path, verbosity: Verbosity) -> Result<Vec<(String, String)>, Box<dyn std::error::Error>> {
-    // 1. CATCH AT THE FOREFRONT
-    // Instead of unwrap_or_default, we map the error and percolate with '?'
-    let content = fs::read_to_string(path).map_err(|e| scream!(verbosity, e))?;
+    let content = fs::read_to_string(path).map_err(|e| failure!(verbosity, e))?;
 
-    // 2. DATA TRANSFORMATION
     let pairs = content.lines()
         .map(|l| l.trim())
         .filter(|l| !l.is_empty())
         .filter_map(|l| l.split_once('='))
-        .filter(|(k, v)| is_valid_name(k.trim()) && !v.trim().is_empty())
-        .map(|(k, v)| (k.trim().to_string(), v.trim().to_string()))
+        // 1. We keep the valid name check, but ONLY trim the key.
+        // 2. We do NOT trim the value 'v' beyond the initial line trim.
+        .filter(|(k, v)| is_valid_name(k.trim()) && !v.is_empty())
+        .map(|(k, v)| (k.trim().to_string(), v.to_string()))
         .collect();
 
-    // 3. SUCCESS WRAP
     Ok(pairs)
 }
-
 
 pub fn resolve_command(cmd: &str) -> Option<AliasAction> {
     match cmd {
@@ -1056,7 +1280,7 @@ pub fn query_alias_file(name: &str, path: &Path, verbosity: Verbosity) -> Result
     let search = format!("{}=", name.to_lowercase());
 
     // Read the file (The Source of Truth)
-    let content = std::fs::read_to_string(path).map_err(|e| scream!(verbosity, e))?;
+    let content = std::fs::read_to_string(path).map_err(|e| failure!(verbosity, e))?;
 
     let found = content
         .lines()
@@ -1265,3 +1489,4 @@ FLAGS:
     }
 //    verbosity.tip(random_tip_show());
 }
+

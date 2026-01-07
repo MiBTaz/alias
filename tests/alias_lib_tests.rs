@@ -1,4 +1,6 @@
 // alias_lib/src/tests/alias_tests.rs
+#[cfg(test)]
+mod tests {
 
 use crate::*;
 use std::env;
@@ -7,6 +9,7 @@ use std::path::{Path, PathBuf};
 // use super::*;
 use std::io;
 use std::sync::Mutex;
+use alias_lib::ShowFeature::Off;
 // =========================================================
 // 1. COMMAND PARSER & ACTION MAPPING (22 Tests)
 // =========================================================
@@ -151,40 +154,6 @@ fn test_empty_value_is_delete_logic() {
 // 2. SOVEREIGN VOICE & UI MACROS (12 Tests)
 // =========================================================
 
-#[test]
-fn test_voice_macro_normal() {
-    let v = voice!(Normal, ShowIcons::On, ShowTips::On);
-    assert_eq!(v.level, VerbosityLevel::Normal);
-    assert!(v.decorations);
-}
-
-#[test]
-fn test_voice_macro_silent() {
-    let v = voice!(Silent, ShowIcons::Off, ShowTips::Off);
-    assert!(v.is_silent());
-    assert!(!v.decorations);
-}
-
-#[test]
-fn test_icon_mapping_success() {
-    let v = Verbosity::normal();
-    assert_eq!(v.get_icon_str(AliasIcon::Success), ICON_MATRIX[5][1]);
-}
-
-#[test]
-fn test_icon_mapping_plain() {
-    let mut v = Verbosity::normal();
-    v.decorations = false;
-    assert_eq!(v.get_icon_str(AliasIcon::Success), ICON_MATRIX[5][0]);
-}
-
-#[test]
-fn test_icon_format_content() {
-    let v = Verbosity::normal();
-    let res = v.icon_format(AliasIcon::Say, "hello");
-    assert!(res.contains("hello"));
-    assert!(res.contains(ICON_MATRIX[AliasIcon::Say as usize][1]));
-}
 
 #[test]
 fn test_icon_format_empty_guard() {
@@ -210,14 +179,14 @@ fn test_shout_macro_execution() {
 }
 
 #[test]
-fn test_scream_macro_io_error() {
+fn test_failure_macro_io_error() {
     let v = Verbosity::silent();
 
     // Create a real IO error to trigger the 2-arg macro arm
     let io_err = std::io::Error::new(std::io::ErrorKind::NotFound, "fake disk error");
 
     // This calls the 2-arg arm: ($verbosity:expr, $err:expr)
-    let err_box = scream!(v, io_err);
+    let err_box = failure!(v, io_err);
 
     assert_eq!(err_box.code, 1); // Default for non-os-coded errors
     assert!(err_box.message.contains("fake disk error"));
@@ -496,7 +465,7 @@ fn test_scream_macro_execution() {
     let v = Verbosity::silent();
 
     // Execute and capture the result
-    let err_box = scream!(v, ErrorCode::MissingFile, "File {} not found", "test.doskey");
+    let err_box = failure!(v, ErrorCode::MissingFile, "File {} not found", "test.doskey");
 
     // ASSERT: Verify the custom error code was mapped correctly
     assert_eq!(err_box.code, ErrorCode::MissingFile as u8);
@@ -510,7 +479,7 @@ fn test_scream_macro_logical_assertion() {
     let v = Verbosity::silent(); // Voice is silent...
 
     // Execute 3-arg logical macro
-    let err = scream!(v, ErrorCode::Generic, "CRITICAL_FAILURE");
+    let err = failure!(v, ErrorCode::Generic, "CRITICAL_FAILURE");
 
     // ASSERT: Even if silent, the error object MUST contain the message
     assert!(err.message.contains("CRITICAL_FAILURE"), "Scream must produce message even when silent");
@@ -525,7 +494,7 @@ fn test_scream_macro_io_assertion() {
     let io_err = std::io::Error::from_raw_os_error(5);
 
     // Execute 2-arg IO macro
-    let err = scream!(v, io_err);
+    let err = failure!(v, io_err);
 
     // ASSERT: Check that it extracted the OS code 5
     assert_eq!(err.code, 5, "Should have extracted OS error code 5");
@@ -533,4 +502,184 @@ fn test_scream_macro_io_assertion() {
     // ASSERT: Check that the message is present
     // (In Windows, code 5 will contain "Access is denied")
     assert!(!err.message.is_empty(), "Scream message should not be empty");
+}
+
+// Helper to simulate CLI Vec<String>
+fn to_args(args: Vec<&str>) -> Vec<String> {
+    args.into_iter().map(|s| s.to_string()).collect()
+}
+
+
+#[test]
+fn test_animal_protection_pivot() {
+    // If a command starts with an "animal", it shouldn't pivot
+    let args = to_args(vec!["alias", "|", "format", "c:"]);
+    let (queue, _, _) = parse_arguments(&args);
+
+    // Queue should be empty (or default to ShowAll) because '|' is illegal
+    assert!(matches!(queue.get(0).unwrap().action, AliasAction::Invalid));
+}
+
+#[test]
+fn test_literal_payload_preserves_trailing_whitespace() {
+    let args = vec![
+        "alias".to_string(),
+        "xcd=cd /d \"C:\\\" ".to_string() // Trailing space inside the string
+    ];
+
+    let (queue, _voice, _path) = parse_arguments(&args);
+
+    if let Some(AliasAction::Set(opts)) = queue.get(0).map(|t| &t.action) {
+        assert_eq!(opts.name, "xcd");
+        assert_eq!(opts.value, "cd /d \"C:\\\" ");
+        assert!(opts.value.ends_with(' '), "The 59th byte (space) was trimmed!");
+    } else {
+        panic!("Queue did not contain a Set action");
+    }
+}
+
+#[test]
+fn test_startup_task_ordering() {
+    let args = vec!["alias".to_string(), "--startup".to_string(), "new=value".to_string()];
+    let (queue, voice, _) = parse_arguments(&args);
+
+    assert!(voice.in_startup, "Startup flag not detected");
+
+    // In our logic, 'new=value' should be in the queue,
+    // and 'Reload' is handled by the 'run' loop's 'in_startup' check.
+    assert_eq!(queue.len(), 1);
+    if let Some(AliasAction::Set(opts)) = queue.get(0).map(|t| &t.action) {
+        assert_eq!(opts.name, "new");
+    }
+}
+
+#[test]
+fn test_voice_macro_normal() {
+    let v = voice!(Normal, ShowFeature::On, ShowTips::On);
+    assert_eq!(v.level, VerbosityLevel::Normal);
+    assert!(v.show_icons.is_on()); // Changed from .icons to .show_icons.is_on()
+}
+
+#[test]
+fn test_voice_macro_silent() {
+    let v = voice!(Silent, ShowFeature::Off, ShowTips::Off);
+    assert!(v.is_silent());
+    assert!(!v.show_icons.is_on()); // Changed from .icons
+}
+
+#[test]
+fn test_env_splice_override() {
+    let mut args = vec!["alias".to_string(), "--icons".to_string()];
+    let env_opts = vec!["--quiet".to_string()];
+    args.splice(1..1, env_opts);
+
+    let (_, voice, _) = parse_arguments(&args);
+
+    assert_eq!(voice.level, VerbosityLevel::Silent);
+    assert!(voice.show_icons.is_on()); // Changed from .icons to .show_icons.is_on()
+}
+
+    #[test]
+    fn test_flag_action_ordering() {
+        let args = to_args(vec!["alias", "--reload", "--which", "xcd"]);
+        let (queue, _, _) = parse_arguments(&args);
+
+        assert_eq!(queue.len(), 3);
+        // Use queue.get(i) instead of queue.tasks[i]
+        assert!(matches!(queue.get(0).unwrap().action, AliasAction::Reload));
+        assert!(matches!(queue.get(1).unwrap().action, AliasAction::Which));
+        assert!(matches!(queue.get(2).unwrap().action, AliasAction::Query(_)));
+    }
+
+    #[test]
+    fn test_pivot_on_assignment() {
+        let args = to_args(vec!["alias", "xcd=dir /d \"C:\\\" "]);
+        let (queue, _, _) = parse_arguments(&args);
+
+        assert_eq!(queue.len(), 1);
+        // FIXED: Using .get(0) instead of .tasks.first()
+        if let Some(AliasAction::Set(opts)) = queue.get(0).map(|t| &t.action) {
+            assert_eq!(opts.name, "xcd");
+            assert!(opts.value.ends_with("\" "));
+        } else {
+            panic!("Should have been a Set action");
+        }
+    }
+
+    #[test]
+    fn test_typo_resilience() {
+        let args = to_args(vec!["alias", "--reloaad", "ls=dir"]);
+        let (queue, _, _) = parse_arguments(&args);
+
+        assert_eq!(queue.len(), 1);
+        // FIXED: Using .get(0)
+        if let Some(AliasAction::Set(opts)) = queue.get(0).map(|t| &t.action) {
+            assert_eq!(opts.name, "ls");
+        }
+    }
+
+    #[test]
+    fn test_file_flag_with_path() {
+        let args = to_args(vec!["alias", "--file", "my_doskeys.txt", "--reload"]);
+        let (queue, _, path) = parse_arguments(&args);
+
+        assert_eq!(path.unwrap().to_str().unwrap(), "my_doskeys.txt");
+        assert_eq!(queue.len(), 1);
+        // FIXED: Using .get(0)
+        assert!(matches!(queue.get(0).unwrap().action, AliasAction::Reload));
+    }
+
+    #[test]
+    fn test_file_line_parsing_integrity() {
+        let mock_file_content = "xcd=dir /d \"C:\\\" \nother=value";
+        let lines = mock_file_content.lines();
+
+        for line in lines {
+            if let Some((name, value)) = line.split_once('=') {
+                let _name = name.trim(); // FIXED: added underscore to suppress warning
+                assert_eq!(value, "dir /d \"C:\\\" ", "File parser trimmed the 59th byte!");
+                break;
+            }
+        }
+    }
+    #[test]
+    fn test_icon_mapping_success() {
+        let v = Verbosity::normal();
+        // Success is index 5. [0] is "OK", [1] is "✨"
+        assert_eq!(v.get_icon_str(AliasIcon::Success), ICON_MATRIX[5][1]);
+    }
+
+    #[test]
+    fn test_icon_mapping_plain() {
+        let mut v = Verbosity::normal();
+        v.show_icons = Off; // Assuming Off maps to index 0 in your get_icon_str logic
+        assert_eq!(v.get_icon_str(AliasIcon::Success), ICON_MATRIX[5][0]);
+    }
+
+    #[test]
+    fn test_icon_format_content() {
+        let v = Verbosity::normal();
+        let res = v.icon_format(AliasIcon::Say, "hello");
+        assert!(res.contains("hello"));
+        // Say is index 7. [1] is "📜"
+        assert!(res.contains(ICON_MATRIX[AliasIcon::Say as usize][1]));
+    }
+    #[test]
+    fn test_invalid_name_short_circuits() {
+        let args = vec!["alias".to_string(), "!!!".to_string(), "payload=stuff".to_string()];
+        let (queue, _voice, _) = parse_arguments(&args);
+
+        // It found 2 items because it didn't give up after '!!!'
+        assert!(queue.len() >= 1);
+        assert!(matches!(queue.get(0).unwrap().action, AliasAction::Invalid));
+    }
+
+    #[test]
+    fn test_leading_hyphen_rejection() {
+        let args = to_args(vec!["alias", "-xcd=dir"]);
+        let (queue, _, _) = parse_arguments(&args);
+
+        // It is no longer empty because we now track invalid attempts
+        assert!(matches!(queue.get(0).unwrap().action, AliasAction::Invalid));
+    }
 }

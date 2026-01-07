@@ -68,7 +68,8 @@ fn test_ui_audit_logic() {
         .expect("Internal set failed");
 
     // FIX: Added required Verbosity argument
-    HybridLibraryInterface::alias_show_all(voice!(Normal, Off, Off));
+    HybridLibraryInterface::alias_show_all(voice!(Normal, Off, Off))
+        .expect("UI Audit logic failed");
 
     if dummy_path.exists() {
         std::fs::remove_file(dummy_path).ok();

@@ -118,7 +118,7 @@ impl AliasProvider for HybridLibraryInterface {
             Err(e) => {
                 // MAP: Convert Box<dyn Error> into a concrete io::Error
                 let io_err = std::io::Error::new(std::io::ErrorKind::Other, e.to_string());
-                let err_struct = scream!(verbosity, io_err);
+                let err_struct = failure!(verbosity, io_err);
                 shout!(verbosity, AliasIcon::Fail, "{}", err_struct.message);
                 Vec::new()
             }
@@ -129,7 +129,7 @@ impl AliasProvider for HybridLibraryInterface {
             Ok(list) => list,
             Err(e) => {
                 let io_err = std::io::Error::new(std::io::ErrorKind::Other, e.to_string());
-                let err_struct = scream!(verbosity, io_err);
+                let err_struct = failure!(verbosity, io_err);
                 shout!(verbosity, AliasIcon::Fail, "{}", err_struct.message);
                 Vec::new()
             }
@@ -141,7 +141,7 @@ impl AliasProvider for HybridLibraryInterface {
                 Ok(list) => list,
                 Err(e) => {
                     let io_err = std::io::Error::new(std::io::ErrorKind::Other, e.to_string());
-                    let err_struct = scream!(verbosity, io_err);
+                    let err_struct = failure!(verbosity, io_err);
                     shout!(verbosity, AliasIcon::Fail, "File Error: {}", err_struct.message);
                     Vec::new()
                 }

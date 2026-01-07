@@ -10,13 +10,13 @@ pub struct WrapperLibraryInterface;
 
 impl alias_lib::AliasProvider for WrapperLibraryInterface {
     /// UPDATED: Now returns io::Result to match the AliasProvider trait.
-    fn get_all_aliases(verbosity: Verbosity) -> io::Result<Vec<(String, String)>> {
+    fn get_all_aliases(_verbosity: Verbosity) -> io::Result<Vec<(String, String)>> {
         let output = Command::new("doskey")
             .arg("/macros:cmd.exe")
             .output()
             .map_err(|e| {
                 // If we can't even spawn doskey, that's a system error
-                let err_box = scream!(Verbosity::loud(), e);
+                let err_box = failure!(Verbosity::loud(), e);
                 io::Error::new(io::ErrorKind::Other, err_box.message)
             })?;
 
@@ -80,12 +80,12 @@ impl alias_lib::AliasProvider for WrapperLibraryInterface {
             .args(["/exename=cmd.exe", &format!("{}={}", clean_name, clean_val)])
             .status()
             .map_err(|e| {
-                let err_box = scream!(Verbosity::loud(), e);
+                let err_box = failure!(Verbosity::loud(), e);
                 io::Error::new(io::ErrorKind::Other, err_box.message)
             })?;
 
         if !status.success() {
-            let err_box = scream!(Verbosity::loud(), ErrorCode::Generic, "Doskey rejected alias: {}", clean_name);
+            let err_box = failure!(Verbosity::loud(), ErrorCode::Generic, "Doskey rejected alias: {}", clean_name);
             return Err(io::Error::new(io::ErrorKind::InvalidInput, err_box.message));
         }
         Ok(true)
@@ -95,7 +95,7 @@ impl alias_lib::AliasProvider for WrapperLibraryInterface {
         let name = if opts.force_case { opts.name.clone() } else { opts.name.to_lowercase() };
 
         if name.is_empty() {
-            let err = scream!(verbosity, ErrorCode::MissingName, "Alias name cannot be empty.");
+            let err = failure!(verbosity, ErrorCode::MissingName, "Alias name cannot be empty.");
             return Err(io::Error::new(io::ErrorKind::InvalidInput, err.message));
         }
 
@@ -117,12 +117,12 @@ impl alias_lib::AliasProvider for WrapperLibraryInterface {
             .arg(format!("/macrofile={}", path.display()))
             .status()
             .map_err(|e| {
-                let err_box = scream!(Verbosity::loud(), e);
+                let err_box = failure!(Verbosity::loud(), e);
                 io::Error::new(io::ErrorKind::Other, err_box.message)
             })?;
 
         if !status.success() {
-            let err_box = scream!(Verbosity::loud(), ErrorCode::Generic, "Doskey failed to load file: {}", path.display());
+            let err_box = failure!(Verbosity::loud(), ErrorCode::Generic, "Doskey failed to load file: {}", path.display());
             return Err(io::Error::new(io::ErrorKind::Other, err_box.message));
         }
         Ok(())
@@ -131,7 +131,7 @@ impl alias_lib::AliasProvider for WrapperLibraryInterface {
     fn write_autorun_registry(cmd: &str, verbosity: Verbosity) -> io::Result<()> {
         let hkcu = winreg::RegKey::predef(winreg::enums::HKEY_CURRENT_USER);
         let (key, _) = hkcu.create_subkey(REG_SUBKEY)
-            .map_err(|e| io::Error::new(e.kind(), scream!(verbosity, e).message))?;
+            .map_err(|e| io::Error::new(e.kind(), failure!(verbosity, e).message))?;
 
         let existing: String = key.get_value(REG_AUTORUN_KEY).unwrap_or_default();
         if existing.contains(cmd) {
@@ -146,7 +146,7 @@ impl alias_lib::AliasProvider for WrapperLibraryInterface {
         };
 
         key.set_value(REG_AUTORUN_KEY, &new_val)
-            .map_err(|e| io::Error::new(e.kind(), scream!(verbosity, e).message))
+            .map_err(|e| io::Error::new(e.kind(), failure!(verbosity, e).message))
     }
 
     fn read_autorun_registry() -> String {

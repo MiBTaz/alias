@@ -2,7 +2,7 @@
 # allow versioning overall without breaking cargo
 [package-info]
 name = "alias"
-version = "0.8.1"
+version = "0.10.0"
 edition = "2024"
 
 [profile.release]
