@@ -1350,8 +1350,8 @@ pub fn parse_macro_file(path: &Path, verbosity: &Verbosity) -> Result<Vec<(Strin
 
     let pairs = content.lines()
         .filter_map(is_data_line)
-        .filter(|(n, _)| is_valid_name(n)) // Extra specific: Strict validation
-        .map(|(n, v)| (n.trim().to_string(), v.to_string()))
+        .filter(|(n, _)| is_valid_name(n)) // Firewall: Drops anything not starting with alpha/underscore
+        .map(|(n, v)| (n.to_string(), v.to_string())) // No more .trim() here!
         .collect();
 
     Ok(pairs)
@@ -1379,6 +1379,32 @@ pub fn query_alias_file(name: &str, path: &Path, verbosity: &Verbosity) -> Resul
     }
 
     Ok(results)
+}
+
+pub fn parse_alias_line(line: &str) -> Option<(String, String)> {
+    // 1. Clean the nulls from the Win32 buffer
+    let line = line.trim_matches('\0');
+    if line.is_empty() { return None; }
+
+    // 2. Split on the FIRST equals sign.
+    // If the entry is "local_test=echo...", raw_n becomes "\"local_test"
+    let (raw_n, raw_v) = match line.split_once('=') {
+        Some(pair) => pair,
+        None => return None,
+    };
+
+    // 3. THE FIX: Only trim whitespace. DO NOT touch quotes.
+    // We need the raw identity to match Win32 RAM exactly.
+    let name = raw_n
+        .trim_matches(|c: char| c.is_whitespace() || c == '\u{00A0}')
+        .to_string();
+
+    let value = raw_v
+        .trim_matches(|c: char| c.is_whitespace() || c == '\u{00A0}')
+        .to_string();
+
+    if name.is_empty() { return None; }
+    Some((name, value))
 }
 
 pub fn is_path_healthy(path: &Path) -> bool {

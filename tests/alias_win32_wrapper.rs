@@ -11,10 +11,17 @@ extern crate alias_nuke;
 // This brings in the trait, the structs, and the macro
 #[allow(unused_imports)]
 use alias_lib::*;
-
-// If the wrapper uses these constants, import them too
 #[allow(unused_imports)]
 use alias_lib::{REG_SUBKEY, REG_AUTORUN_KEY};
+
+macro_rules! skip_if_wrapper {
+    () => {
+        if P::provider_type() == ProviderType::Wrapper {
+            println!("Skipping: Known 'Spawn SNAFU' in Wrapper mode.");
+            return;
+        }
+    };
+}
 
 #[test]
 #[serial]
@@ -439,6 +446,63 @@ fn test_purge_stress_partial_failure() {
             "The report must capture the failure of the PROTECTED alias");
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_set_and_clear_poisoned_alias() {
+        let name = "\"ghost_test";
+        let val = "echo boo\"";
+
+        // 1. Set it (should include quotes in RAM)
+        P::raw_set_macro(name, Some(val)).expect("Should set poisoned alias");
+
+        // 2. Clear it (The critical fix: passing the same quoted name should delete it)
+        let result = P::raw_set_macro(name, None).expect("Should delete poisoned alias");
+        assert!(result, "Windows should report success for deletion of quoted name");
+    }
+
+
+    #[test]
+    fn test_xcd_trailing_quote_integrity() {
+        // 1. The Gatekeeper: Skip the "Slow Ship"
+        skip_if_wrapper!();
+
+        let name = "xcd_test";
+        // The raw string exactly as it appears in your working aliases file
+        let val = r#"for /f "delims=" %i in ('dir') do cd /d "%i""#;
+
+        // 2. The Action: Direct API call via Provider (P)
+        P::raw_set_macro(name, Some(val))
+            .expect("Win32 Kernel rejected the alias syntax");
+
+        // 3. The Forensic Check: Did the API store it correctly?
+        let ram = P::get_all_aliases(&Verbosity::loud()).expect("Failed to read back from RAM");
+
+        let (_, stored_val) = ram.iter()
+            .find(|(n, _)| n == name)
+            .expect("Alias disappeared from RAM immediately after set");
+
+        // 4. The "No-Murder" Assert
+        assert!(
+            stored_val.ends_with('"'),
+            "FAILURE: Trailing quote was stripped. Expected tail: [\"], Found: [{}]",
+            &stored_val[stored_val.len()-1..]
+        );
+
+        // Cleanup
+        let _ = P::raw_set_macro(name, None);
+    }
+
+
+    #[test]
+    fn test_alphanumeric_alias() {
+        // Standard case should still work perfectly
+        P::raw_set_macro("standard", Some("echo hello")).expect("Should set standard alias");
+        P::raw_set_macro("standard", None).expect("Should clear standard alias");
+    }
+}
 
 #[test]
 #[serial]

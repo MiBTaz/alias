@@ -16,7 +16,7 @@ pub use alias_lib::{REG_SUBKEY, REG_AUTORUN_KEY};
 
 /// Helper to generate the silo name based on the environment.
 fn get_test_silo_name() -> String {
-    if std::env::var("ALIAS_TEST_BUCKET").is_ok() || cfg!(test) {
+    if env::var("ALIAS_TEST_BUCKET").is_ok() || cfg!(test) {
         format!("alias_test_silo_{:?}", std::thread::current().id())
     } else {
         "cmd.exe".to_string()
@@ -44,24 +44,19 @@ impl AliasProvider for Win32LibraryInterface {
     fn raw_set_macro(name: &str, value: Option<&str>) -> io::Result<bool> {
         trace!("ENTERING raw_set_macro: name='{}', has_value={}", name, value.is_some());
 
-        // 1. Clean the input to prevent Ghost Quotes in the Kernel
-        let n_cleaned = name.trim_matches('"');
-        let n_wide: Vec<u16> = std::ffi::OsStr::new(n_cleaned)
+        // 1. NO MORE TRIMMING. Pass the name EXACTLY as it is.
+        let n_wide: Vec<u16> = std::ffi::OsStr::new(name)
             .encode_wide().chain(Some(0)).collect();
 
-        trace!("Name cleaned for Win32: '{}' (Wide len: {})", n_cleaned, n_wide.len());
-
         let v_wide: Option<Vec<u16>> = value.map(|v| {
-            let v_cleaned = v.trim_matches('"');
-            let encoded: Vec<u16> = std::ffi::OsStr::new(v_cleaned).encode_wide().chain(Some(0)).collect();
-            trace!("Value cleaned for Win32: '{}' (Wide len: {})", v_cleaned, encoded.len());
+            // 2. NO MORE TRIMMING. The quote in "%i" is vital!
+            let encoded: Vec<u16> = std::ffi::OsStr::new(v)
+                .encode_wide().chain(Some(0)).collect();
             encoded
         });
 
         unsafe {
             let exe_ptr = get_target_exe_wide();
-            trace!("Calling AddConsoleAliasW for target EXE pointer");
-
             let success = AddConsoleAliasW(
                 n_wide.as_ptr(),
                 v_wide.as_ref().map_or(std::ptr::null(), |v| v.as_ptr()),
@@ -70,15 +65,12 @@ impl AliasProvider for Win32LibraryInterface {
 
             if !success {
                 let code = GetLastError();
-                trace!("AddConsoleAliasW FAILED. Win32 Error Code: {}", code);
-                // This is the "Percolation": converting a Win32 code into a Rust IO Error
                 return Err(io::Error::new(
                     io::ErrorKind::Other,
                     format!("Win32 Kernel rejected alias (Error Code: {})", code)
                 ));
             }
 
-            trace!("AddConsoleAliasW SUCCESS for '{}'", n_cleaned);
             Ok(true)
         }
     }
@@ -142,18 +134,9 @@ impl AliasProvider for Win32LibraryInterface {
             let wide_slice = &buffer[.. (read_bytes / 2) as usize];
 
             let list: Vec<(String, String)> = String::from_utf16_lossy(wide_slice)
-                .split('\0') // Win32 separation
-                .filter_map(|line| {
-                    let trimmed = line.trim();
-                    if trimmed.is_empty() { return None; }
-
-                    line.split_once('=').map(|(n, v)| {
-                        // Sanitization: Remove quotes so RAM matches Disk for the audit
-                        (n.trim_matches('"').to_string(), v.trim_matches('"').to_string())
-                    })
-                })
+                .split('\0')
+                .filter_map(parse_alias_line)
                 .collect();
-
             Ok(list)
         }
     }
@@ -164,7 +147,7 @@ impl AliasProvider for Win32LibraryInterface {
         let raw_existing: String = key.get_value(REG_AUTORUN_KEY).unwrap_or_default();
 
         // Identify ourselves ruggedly (current binary name)
-        let my_name = std::env::current_exe()?
+        let my_name = env::current_exe()?
             .file_name()
             .and_then(|n| n.to_str())
             .unwrap_or("alias.exe")
@@ -180,8 +163,8 @@ impl AliasProvider for Win32LibraryInterface {
 
         // Use retain to filter in-place:
         // 1. If it's not us, keep it.
-        // 2. If it IS us and it's the FIRST time, swap it and keep it.
-        // 3. If it IS us and we already found a match, discard it (Deduplicate).
+        // 2. If it IS us, and it's the FIRST time, swap it and keep it.
+        // 3. If it IS us, and we already found a match, discard it (Deduplicate).
         entries.retain_mut(|entry| {
             if entry.to_lowercase().contains(&my_name) {
                 if !first_match_found {

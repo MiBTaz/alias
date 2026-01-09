@@ -1866,3 +1866,44 @@ mod battery_19 {
     }
 }
 
+#[cfg(test)]
+mod battery_20 {
+    use alias_lib::parse_alias_line;
+
+    #[test]
+    fn test_parse_alias_line_comprehensive() {
+        let cases = vec![
+            // 1. Simple case (Still works)
+            ("rust=cargo $*", Some(("rust", "cargo $*"))),
+
+            // 2. Quoted LHS (FIXED: Now we EXPECT the quotes to stay)
+            ("\"my alias\"=echo hello", Some(("\"my alias\"", "echo hello"))),
+
+            // 3. The "XCD" (Still works, and now we know WHY it works)
+            ("xcd=cd /d \"%i\"", Some(("xcd", "cd /d \"%i\""))),
+
+            // 4. Kanji (Still works)
+            ("エイリアス=echo kanji", Some(("エイリアス", "echo kanji"))),
+
+            // 5. Whitespace (Still works because we still .trim() whitespace, just not quotes)
+            ("  clean \u{00A0}=  value with space  ", Some(("clean", "value with space"))),
+
+            // ...
+
+            // 10. Unbalanced LHS quote (FIXED: Expect the literal quote)
+            ("\"unbalanced=value", Some(("\"unbalanced", "value"))),
+        ];
+        for (input, expected) in cases {
+            let result = parse_alias_line(input);
+
+            match (result, expected) {
+                (Some((n, v)), Some((en, ev))) => {
+                    assert_eq!(n, en, "Name mismatch on input: {}", input);
+                    assert_eq!(v, ev, "Value mismatch on input: {}", input);
+                }
+                (None, None) => {} // Correctly failed
+                (r, e) => panic!("Failed test case '{}'. Got {:?}, expected {:?}", input, r, e),
+            }
+        }
+    }
+}
