@@ -16,7 +16,7 @@ fn test_registry_append_logic() {
 
     P::write_autorun_registry(
         &format!("{} & alias --reload", original_cmd),
-        Verbosity::normal()
+        &Verbosity::normal()
     ).expect("Install failed");
 
     let result: String = key.get_value(REG_AUTORUN_KEY).unwrap();
@@ -28,7 +28,7 @@ fn test_registry_append_logic() {
 #[serial]
 fn test_routine_setup_registration() {
     // Verifies the install_autorun branch in the provider
-    let _ = P::install_autorun(Verbosity::silent());
+    let _ = P::install_autorun(&Verbosity::silent());
 }
 
 #[test]
@@ -37,7 +37,7 @@ fn test_win32_international_roundtrip_repeat() {
     let name = "λ_alias";
     let val = "echo lambda_power";
     assert!(P::raw_set_macro(name, Some(val)).unwrap());
-    let all = P::get_all_aliases(voice!(Silent, Off, Off)).unwrap(); // Add .unwrap()
+    let all = P::get_all_aliases(&voice!(Silent, Off, Off)).unwrap(); // Add .unwrap()
     let found = all.iter().find(|(n, _)| n == name);
     assert!(found.is_some());
     assert_eq!(found.unwrap().1, val);

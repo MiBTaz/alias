@@ -1,6 +1,9 @@
-// alias_wrapper/tests/alias_lib_integration_test.rs
+// alias_win32/tests/tests.rs
+
 // 1. Pull in the public API of the library
+#[allow(unused_imports)]
 use alias_lib::*;
+// use alias_wrapper::*;
 
 /// ---------------------------------------------------------
 /// 1. LOCAL TESTS (Specific to this crate)
@@ -18,20 +21,4 @@ fn test_local_logic() {
 /// ---------------------------------------------------------
 #[cfg(test)]
 #[path = "../../tests/alias_lib_tests.rs"]
-mod shared_lib;
-
-/// ---------------------------------------------------------
-/// 3. THE WRAPPER SPECIALIST (Muscle Test 2)
-/// ---------------------------------------------------------
-#[cfg(test)]
-mod wrapper_specialist {
-    // 1. Bring the muscle into this room
-//    use alias_lib::*;
-
-    // 2. Point to the shared test file
-    #[path = "../../tests/alias_win32_wrapper.rs"]
-    mod shared_muscle {
-        // 3. THIS IS THE KEY: Reach up and grab 'set_alias' from the parent room
- //       use super::*;
-    }
-}
+mod shared_under_wrapper;

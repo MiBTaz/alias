@@ -7,6 +7,7 @@ edition = "2024"
 [dependencies]
 alias_lib = { path = "../alias_lib" }
 winreg = "0.55.0"
+tempfile = "3.24.0"
 
 [dev-dependencies]
 serial_test = "3.1.1"

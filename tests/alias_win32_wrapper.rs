@@ -2,6 +2,8 @@
 
 #[allow(unused_imports)]
 use std::fs;
+#[allow(unused_imports)]
+use std::io;
 use std::path::PathBuf;
 #[allow(unused_imports)]
 use serial_test::serial;
@@ -35,7 +37,7 @@ fn test_alias_deletion_persistence() {
     };
 
     // Note: set_alias now takes 3 args: (SetOptions, &Path, bool)
-    let _ = P::set_alias(opts, &test_path, voice!(Silent, ShowFeature::Off, ShowTips::Off));
+    let _ = P::set_alias(opts, &test_path, &voice!(Silent, ShowFeature::Off, ShowTips::Off));
 
     let content = fs::read_to_string(&test_path).unwrap();
     assert!(!content.contains("cdx="), "The ghost of cdx is still in the file!");
@@ -49,7 +51,7 @@ fn test_alias_deletion_persistence() {
 fn test_routine_diagnostics_safety() {
     let path = get_test_path("diag");
     // Ensure it doesn't panic even if file doesn't exist
-    P::run_diagnostics(&path, voice!(Silent, ShowFeature::Off, ShowTips::Off)).expect("Diagnostics failed");
+    P::run_diagnostics(&path, &voice!(Silent, ShowFeature::Off, ShowTips::Off)).expect("Diagnostics failed");
 }
 
 #[test]
@@ -57,7 +59,7 @@ fn test_routine_diagnostics_safety() {
 fn test_routine_setup_registration() {
     // We test that the command executes. Result may be Err if no Admin,
     // but the logic path is exercised.
-    let _ = P::install_autorun(voice!(Silent, ShowFeature::Off, ShowTips::Off));
+    let _ = P::install_autorun(&voice!(Silent, ShowFeature::Off, ShowTips::Off));
 }
 
 #[test]
@@ -73,12 +75,12 @@ fn test_routine_set_persistence() {
         value: val.into(),
         volatile: false,
         force_case: false,
-    }, &path, voice!(Silent, ShowFeature::Off, ShowTips::Off)).expect("Set Persistence failed");
+    }, &path, &voice!(Silent, ShowFeature::Off, ShowTips::Off)).expect("Set Persistence failed");
 
     // RAM Check: Retry loop to handle Win32 kernel latency
     let mut success = false;
     for _ in 0..5 {
-        let query = P::query_alias(name, voice!(Silent, ShowFeature::Off, ShowTips::Off));
+        let query = P::query_alias(name, &voice!(Silent, ShowFeature::Off, ShowTips::Off));
         if !query.is_empty() && query.iter().any(|s: &String| s.contains(val)) {
             success = true;
             break;
@@ -94,7 +96,7 @@ fn test_routine_set_persistence() {
 #[test]
 #[serial]
 fn test_routine_show_all() {
-    P::alias_show_all(voice!(Normal, ShowFeature::Off, ShowTips::Off)).expect("Audit should pass");
+    P::alias_show_all(&voice!(Normal, ShowFeature::Off, ShowTips::Off)).expect("Audit should pass");
 }
 
 // -------------------------------
@@ -120,7 +122,7 @@ fn test_real_file_deletion() {
     };
 
     // FIXED: Passed test_v() instead of 'true'
-    P::set_alias(opts, &path, test_v()).unwrap();
+    P::set_alias(opts, &path, &test_v()).unwrap();
 
     let content = fs::read_to_string(&path).unwrap();
     assert!(!content.contains("cdx="));
@@ -134,10 +136,10 @@ fn test_routine_reload_full() {
     fs::write(&path, "reload_key=reload_val\n").unwrap();
 
     // FIXED: Signature now requires Verbosity
-    P::reload_full(&path, test_v()).expect("Reload failed");
+    P::reload_full(&path, &test_v()).expect("Reload failed");
 
     // FIXED: query_alias now requires Verbosity
-    let results = P::query_alias("reload_key", test_v());
+    let results = P::query_alias("reload_key", &test_v());
     assert!(results.iter().any(|s: &String| s.contains("reload_val")));
 
     let _ = fs::remove_file(path);
@@ -148,14 +150,14 @@ fn test_routine_reload_full() {
 fn test_routine_diagnostics() {
     let path = PathBuf::from("diag_test.doskey");
     // FIXED: Signature changed from (path) to (path, verbosity)
-    P::run_diagnostics(&path, voice!(Silent, ShowFeature::Off, ShowTips::Off)).expect("Diagnostics failed");
+    P::run_diagnostics(&path, &voice!(Silent, ShowFeature::Off, ShowTips::Off)).expect("Diagnostics failed");
 }
 
 #[test]
 #[serial]
 fn test_routine_install_autorun() {
     // FIXED: Passed test_v() instead of 'true'
-    let _ = P::install_autorun(test_v());
+    let _ = P::install_autorun(&test_v());
 }
 
 #[test]
@@ -169,9 +171,9 @@ fn test_routine_volatile_strike() {
         force_case: false,
     };
 
-    P::set_alias(opts, &path, test_v()).unwrap();
+    P::set_alias(opts, &path, &test_v()).unwrap();
 
-    let query = P::query_alias("temp_macro", test_v());
+    let query = P::query_alias("temp_macro", &test_v());
     assert!(query.iter().any(|s: &String| s.contains("echo tmp")));
 
     if path.exists() {
@@ -193,9 +195,9 @@ fn test_routine_force_case() {
         force_case: true,
     };
 
-    P::set_alias(opts, &path, test_v()).expect("Forced set failed");
+    P::set_alias(opts, &path, &test_v()).expect("Forced set failed");
 
-    let query = P::query_alias(name, test_v());
+    let query = P::query_alias(name, &test_v());
     assert!(query.iter().any(|s: &String| s.to_lowercase().contains("forced")));
 
     let _ = fs::remove_file(path);
@@ -226,8 +228,8 @@ pub mod testing {
             force_case: false,
         };
 
-        P::set_alias(opts, &path, v).expect("Failed to set alias");
-        let results = P::query_alias(name, v);
+        P::set_alias(opts, &path, &v).expect("Failed to set alias");
+        let results = P::query_alias(name, &v);
         assert!(results.iter().any(|s: &String| s.contains(val)));
 
         let _ = std::fs::remove_file(path);
@@ -236,7 +238,7 @@ pub mod testing {
     pub fn run_generic_registry_test<P: AliasProvider>() {
         let test_cmd = "echo alias_test_hook";
         let verbosity = Verbosity::silent();
-        let res = P::write_autorun_registry(test_cmd, verbosity);
+        let res = P::write_autorun_registry(test_cmd, &verbosity);
         assert!(res.is_ok());
         let current = P::read_autorun_registry();
         assert!(current.contains(test_cmd));
@@ -260,13 +262,13 @@ fn test_routine_set_and_query() {
     };
 
     // FIX: Call via the Interface P
-    P::set_alias(opts, &path, voice!(Silent, Off, Off)).expect("Failed to set alias");
+    P::set_alias(opts, &path, &voice!(Silent, Off, Off)).expect("Failed to set alias");
 
     let content = std::fs::read_to_string(&path).unwrap();
     assert!(content.contains("gauntlet_test=echo gauntlet"));
 
     // FIX: Call via P and add closure type annotation
-    let results = P::query_alias(name, voice!(Silent, Off, Off));
+    let results = P::query_alias(name, &voice!(Silent, Off, Off));
     if !results.is_empty() {
         assert!(results.iter().any(|s: &String| s.contains(val))); // Added : &String
     }
@@ -281,13 +283,13 @@ fn test_routine_reload_sync() {
     fs::write(&path, "k1=v1\nk2=v2\n").unwrap();
 
     // FIX: Use trait method for purging
-    let _ = P::purge_ram_macros(voice!(Silent, Off, Off));
+    let _ = P::purge_ram_macros(&voice!(Silent, Off, Off));
 
     // FIX: Use trait method for reloading
-    P::reload_full(&path, test_v()).expect("Reload failed");
+    P::reload_full(&path, &test_v()).expect("Reload failed");
 
-    let q1 = P::query_alias("k1", test_v());
-    let q2 = P::query_alias("k2", test_v());
+    let q1 = P::query_alias("k1", &test_v());
+    let q2 = P::query_alias("k2", &test_v());
 
     assert!(!q1.is_empty());
     assert!(!q2.is_empty());
@@ -305,7 +307,7 @@ fn test_win32_api_roundtrip() {
     let name = "test_alias_123";
     let val = "echo hello";
     P::raw_set_macro(name, Some(val)).unwrap();
-    let all = P::get_all_aliases(voice!(Silent, Off, Off)).expect("Failed to read RAM macros");
+    let all = P::get_all_aliases(&voice!(Silent, Off, Off)).expect("Failed to read RAM macros");
     let found = all.iter().find(|(n, _)| n == name);
     assert!(found.is_some());
     P::raw_set_macro(name, None).unwrap();
@@ -316,8 +318,8 @@ fn test_win32_api_roundtrip() {
 fn test_routine_clear_ram() {
     let name = "purge_me";
     P::raw_set_macro(name, Some("temporary")).unwrap();
-    let _ = P::purge_ram_macros(voice!(Silent, Off, Off)).expect("Purge failed");
-    let results = P::query_alias(name, Verbosity::normal());
+    let _ = P::purge_ram_macros(&voice!(Silent, Off, Off)).expect("Purge failed");
+    let results = P::query_alias(name, &Verbosity::normal());
     assert!(results.iter().all(|s| !s.contains("temporary")));
 }
 
@@ -333,8 +335,8 @@ fn test_routine_delete_sync() {
         volatile: false,
         force_case: false,
     };
-    P::set_alias(opts, &path, Verbosity::normal()).unwrap();
-    let query = P::query_alias("ghost", Verbosity::normal());
+    P::set_alias(opts, &path, &Verbosity::normal()).unwrap();
+    let query = P::query_alias("ghost", &Verbosity::normal());
     assert!(query.is_empty() || query[0].contains("not found"));
 
     let _ = fs::remove_file(path);
@@ -354,7 +356,7 @@ fn test_thread_silo_isolation() {
 
     std::thread::sleep(std::time::Duration::from_millis(50));
 
-    let all = P::get_all_aliases(voice!(Silent, Off, Off)).expect("Failed to read RAM macros");
+    let all = P::get_all_aliases(&voice!(Silent, Off, Off)).expect("Failed to read RAM macros");
 
     // Prove both exist independently
     let has_a = all.iter().any(|(n, _)| n == &name_a);
@@ -367,6 +369,76 @@ fn test_thread_silo_isolation() {
     P::raw_set_macro(&name_a, None).unwrap();
     P::raw_set_macro(&name_b, None).unwrap();
 }
+
+#[test]
+fn test_purge_stress_partial_failure() {
+    let v = Verbosity::mute();
+
+    // 1. Define a Mock that fails to delete any alias named "PROTECTED"
+    struct MaliciousMock;
+    impl AliasProvider for MaliciousMock {
+        // --- 1. The Logic you care about ---
+        fn raw_set_macro(name: &str, value: Option<&str>) -> io::Result<bool> {
+            if name == "PROTECTED" && value.is_none() {
+                return Ok(false);
+            }
+            Ok(true)
+        }
+
+        fn get_all_aliases(_: &Verbosity) -> io::Result<Vec<(String, String)>> {
+            Ok(vec![
+                ("ls".into(), "dir".into()),
+                ("PROTECTED".into(), "secret".into()),
+            ])
+        }
+        // --- 2. The Updated Paperwork (Matching lib.rs Trait) ---
+
+        // MATCH: &std::path::Path instead of &str
+        fn raw_reload_from_file(_v: &Verbosity,_: &std::path::Path) -> io::Result<()> { Ok(()) }
+
+        fn write_autorun_registry(_cmd: &str, _v: &Verbosity) -> io::Result<()> { Ok(()) }
+
+        // MATCH: Returns String directly, not Result<Option>
+        fn read_autorun_registry() -> String { String::new() }
+
+        // MATCH: Returns Vec<String>
+        fn query_alias(_: &str, _: &Verbosity) -> Vec<String> { vec![] }
+
+        // MATCH: SetOptions and &Path
+        fn set_alias(_: SetOptions, _: &std::path::Path, _: &Verbosity) -> io::Result<()> { Ok(()) }
+
+        // MATCH: Result<(), Box<dyn Error>>
+        fn alias_show_all(_: &Verbosity) -> Result<(), Box<dyn std::error::Error>> { Ok(()) }
+
+        // MATCH: &Path and Result<(), Box<dyn Error>>
+        fn run_diagnostics(_path: &std::path::Path, _verbosity: &Verbosity) -> Result<(), Box<dyn std::error::Error>> { Ok(()) }
+
+        fn purge_ram_macros(v: &Verbosity) -> io::Result<PurgeReport> {
+            let mut report = PurgeReport::default();
+
+            // 1. Get the aliases from the Mock's own provider
+            let aliases = Self::get_all_aliases(v)?;
+
+            for (name, _) in aliases {
+                // 2. Try to "delete" via the Mock's own raw_set_macro
+                match Self::raw_set_macro(&name, None) {
+                    Ok(true) => report.cleared.push(name),
+                    _ => report.failed.push((name, 5)),
+                }
+            }
+            Ok(report)
+        }
+
+    }
+    // 2. Run the purge
+    let report = MaliciousMock::purge_ram_macros(&v).unwrap();
+
+    // 3. Validation
+    assert!(report.cleared.contains(&"ls".to_string()));
+    assert!(report.failed.iter().any(|(name, _)| name == "PROTECTED"),
+            "The report must capture the failure of the PROTECTED alias");
+}
+
 
 #[test]
 #[serial]

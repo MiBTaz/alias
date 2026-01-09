@@ -18,10 +18,10 @@ fn test_wrapper_strike_direct() {
     };
 
     // FIX: Call via the Interface 'P'
-    P::set_alias(opts, &path, voice!(Silent, ShowFeature::Off, ShowTips::Off)).expect("Wrapper strike failed");
+    P::set_alias(opts, &path, &voice!(Silent, ShowFeature::Off, ShowTips::Off)).expect("Wrapper strike failed");
 
     // FIX: Add explicit type &String to the closure
-    let results = P::query_alias("local_test", voice!(Silent, Off, Off));
+    let results = P::query_alias("local_test", &voice!(Silent, Off, Off));
     assert!(results.iter().any(|r: &String| r.contains("wrapper_direct")));
 
     let _ = std::fs::remove_file(path);
@@ -39,10 +39,10 @@ fn test_wrapper_complex_chain() {
     };
 
     // FIX: Call via the Interface 'P'
-    P::set_alias(opts, &path, voice!(Silent, Off, Off)).expect("Wrapper failed to set complex alias");
+    P::set_alias(opts, &path, &voice!(Silent, Off, Off)).expect("Wrapper failed to set complex alias");
 
     // FIX: Call via the Interface 'P' and add type hint
-    let results = P::query_alias("chain", voice!(Silent, Off, Off));
+    let results = P::query_alias("chain", &voice!(Silent, Off, Off));
     assert!(results.iter().any(|r: &String| r.contains("echo part2")), "Command chain was truncated or mangled");
 }
 
@@ -50,7 +50,7 @@ fn test_wrapper_complex_chain() {
 #[serial]
 fn test_wrapper_setup_flow() {
     // FIX: Call via the Interface 'P'
-    P::install_autorun(voice!(Silent, Off, Off)).expect("Wrapper install failed");
+    P::install_autorun(&voice!(Silent, Off, Off)).expect("Wrapper install failed");
 }
 
 // Helper kept local

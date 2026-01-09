@@ -40,11 +40,11 @@ fn test_hybrid_fallback_logic_robust() {
     };
 
     // FIX: Replaced 'true' (bool) with 'voice!(Silent, Off, Off)'
-    HybridLibraryInterface::set_alias(opts, dummy_path, voice!(Silent, Off, Off))
+    HybridLibraryInterface::set_alias(opts, dummy_path, &voice!(Silent, Off, Off))
         .expect("Internal set failed");
 
     // FIX: Replaced 'OutputMode::Silent' with 'voice!(Silent, Off, Off)'
-    let results = HybridLibraryInterface::query_alias(name, voice!(Silent, Off, Off));
+    let results = HybridLibraryInterface::query_alias(name, &voice!(Silent, Off, Off));
 
     assert!(results.iter().any(|s| s.contains(val)), "Hybrid fallback logic failed internally");
 }
@@ -64,11 +64,11 @@ fn test_ui_audit_logic() {
     };
 
     // FIX: Replaced 'true' with 'voice!(Silent, Off, Off)'
-    HybridLibraryInterface::set_alias(opts, dummy_path, voice!(Silent, Off, Off))
+    HybridLibraryInterface::set_alias(opts, dummy_path, &voice!(Silent, Off, Off))
         .expect("Internal set failed");
 
     // FIX: Added required Verbosity argument
-    HybridLibraryInterface::alias_show_all(voice!(Normal, Off, Off))
+    HybridLibraryInterface::alias_show_all(&voice!(Normal, Off, Off))
         .expect("UI Audit logic failed");
 
     if dummy_path.exists() {
@@ -76,7 +76,6 @@ fn test_ui_audit_logic() {
     }
 }
 
-use alias_win32::{REG_SUBKEY, REG_AUTORUN_KEY};
 type P = HybridLibraryInterface; // Define P for the template
 
 include!("../../tests/cli_tests_win32.rs");

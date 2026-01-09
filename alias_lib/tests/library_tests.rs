@@ -1,6 +1,5 @@
 // alias_lib/tests/library_tests.rs
 // 1. Pull in the public API of the library
-use alias_lib::*;
 
 /// ---------------------------------------------------------
 /// LOCAL TESTS (Specific to this crate)

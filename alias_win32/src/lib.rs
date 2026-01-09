@@ -9,6 +9,7 @@ use windows_sys::Win32::System::Console::{
 };
 use alias_lib::*;
 use std::os::windows::ffi::OsStrExt;
+use std::time::Duration;
 use winreg::RegKey;
 use winreg::enums::HKEY_CURRENT_USER;
 pub use alias_lib::{REG_SUBKEY, REG_AUTORUN_KEY};
@@ -40,7 +41,59 @@ fn get_target_exe_wide() -> *const u16 {
 pub struct Win32LibraryInterface;
 
 impl AliasProvider for Win32LibraryInterface {
-    fn get_all_aliases(verbosity: Verbosity) -> io::Result<Vec<(String, String)>> {
+    fn raw_set_macro(name: &str, value: Option<&str>) -> io::Result<bool> {
+        trace!("ENTERING raw_set_macro: name='{}', has_value={}", name, value.is_some());
+
+        // 1. Clean the input to prevent Ghost Quotes in the Kernel
+        let n_cleaned = name.trim_matches('"');
+        let n_wide: Vec<u16> = std::ffi::OsStr::new(n_cleaned)
+            .encode_wide().chain(Some(0)).collect();
+
+        trace!("Name cleaned for Win32: '{}' (Wide len: {})", n_cleaned, n_wide.len());
+
+        let v_wide: Option<Vec<u16>> = value.map(|v| {
+            let v_cleaned = v.trim_matches('"');
+            let encoded: Vec<u16> = std::ffi::OsStr::new(v_cleaned).encode_wide().chain(Some(0)).collect();
+            trace!("Value cleaned for Win32: '{}' (Wide len: {})", v_cleaned, encoded.len());
+            encoded
+        });
+
+        unsafe {
+            let exe_ptr = get_target_exe_wide();
+            trace!("Calling AddConsoleAliasW for target EXE pointer");
+
+            let success = AddConsoleAliasW(
+                n_wide.as_ptr(),
+                v_wide.as_ref().map_or(std::ptr::null(), |v| v.as_ptr()),
+                exe_ptr
+            ) != 0;
+
+            if !success {
+                let code = GetLastError();
+                trace!("AddConsoleAliasW FAILED. Win32 Error Code: {}", code);
+                // This is the "Percolation": converting a Win32 code into a Rust IO Error
+                return Err(io::Error::new(
+                    io::ErrorKind::Other,
+                    format!("Win32 Kernel rejected alias (Error Code: {})", code)
+                ));
+            }
+
+            trace!("AddConsoleAliasW SUCCESS for '{}'", n_cleaned);
+            Ok(true)
+        }
+    }
+    fn raw_reload_from_file(_verbosity: &Verbosity, path: &Path) -> io::Result<()> {
+        // We pass Verbosity::silent() to satisfy the signature
+        let macros = parse_macro_file(path, &Verbosity::silent())
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+
+        for (n, v) in macros {
+            Self::raw_set_macro(&n, Some(&v))?;
+        }
+        Ok(())
+    }
+
+    fn get_all_aliases(_verbosity: &Verbosity) -> io::Result<Vec<(String, String)>> {
         let exe_name = get_target_exe_wide();
 
         unsafe {
@@ -50,8 +103,9 @@ impl AliasProvider for Win32LibraryInterface {
                 let code = GetLastError();
                 // 203 = ERROR_ENVVAR_NOT_FOUND
                 if code == 203 || code == 0 {
-                    let msg = text!(verbosity, AliasIcon::Alert, "no macros found in Win32 RAM.");
-                    return Ok(vec![(msg, String::new())]);
+                    // let msg = text!(verbosity, AliasIcon::Alert, "no macros found in Win32 RAM.");
+                    // return Ok(vec![(msg, String::new())]);
+                    return Ok(Vec::new());
                 }
                 return Err(io::Error::new(io::ErrorKind::Other, format!("Kernel failed length query (Code {})", code)));
             }
@@ -103,7 +157,97 @@ impl AliasProvider for Win32LibraryInterface {
             Ok(list)
         }
     }
-    fn query_alias(name: &str, verbosity: Verbosity) -> Vec<String> {
+    fn write_autorun_registry(cmd: &str, verbosity: &Verbosity) -> io::Result<()> {
+        let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+        let (key, _) = hkcu.create_subkey(REG_SUBKEY)?;
+
+        let raw_existing: String = key.get_value(REG_AUTORUN_KEY).unwrap_or_default();
+
+        // Identify ourselves ruggedly (current binary name)
+        let my_name = std::env::current_exe()?
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("alias.exe")
+            .to_lowercase();
+
+        let mut entries: Vec<String> = raw_existing
+            .split('&')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+
+        let mut first_match_found = false;
+
+        // Use retain to filter in-place:
+        // 1. If it's not us, keep it.
+        // 2. If it IS us and it's the FIRST time, swap it and keep it.
+        // 3. If it IS us and we already found a match, discard it (Deduplicate).
+        entries.retain_mut(|entry| {
+            if entry.to_lowercase().contains(&my_name) {
+                if !first_match_found {
+                    *entry = cmd.to_string(); // SWAP
+                    first_match_found = true;
+                    true // Keep the first (now updated) match
+                } else {
+                    false // Drop subsequent matches (Clean up the leak)
+                }
+            } else {
+                true // Keep other tools (Clink, etc.)
+            }
+        });
+
+        if !first_match_found {
+            entries.push(cmd.to_string()); // APPEND only if we weren't there
+        }
+
+        let final_val = entries.join(" & ");
+        key.set_value(REG_AUTORUN_KEY, &final_val)?;
+
+        shout!(verbosity, AliasIcon::Success, "AutoRun synchronized (Deduplicated & Position Preserved).");
+        Ok(())
+    }
+
+    fn read_autorun_registry() -> String {
+        let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+        // We open the key and get the value, defaulting to empty string on any error
+        hkcu.open_subkey(REG_SUBKEY)
+            .and_then(|key| key.get_value(REG_AUTORUN_KEY))
+            .unwrap_or_default()
+    }
+
+    fn purge_ram_macros(verbosity: &Verbosity) -> io::Result<PurgeReport> {
+        let mut report = PurgeReport { cleared: Vec::new(), failed: Vec::new() };
+        // Now using ? on the getter
+        for (name, _) in Self::get_all_aliases(verbosity)? {
+            if Self::raw_set_macro(&name, None)? {
+                report.cleared.push(name);
+            } else {
+                report.failed.push((name, unsafe { GetLastError() }));
+            }
+        }
+        Ok(report)
+    }
+
+    fn reload_full(path: &Path, verbosity: &Verbosity) -> Result<(), Box<dyn std::error::Error>> {
+        let _ = Self::purge_ram_macros(verbosity);
+
+        // 1. Add '?' to percolate the error and get the Vec
+        // 2. Pass verbosity to match the new signature
+        let macros = parse_macro_file(path, verbosity)
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+
+        let mut count = 0;
+        for (n, v) in macros {
+            // Use '?' here too to ensure we stop on a kernel failure
+            Self::raw_set_macro(&n, Some(&v))?;
+            count += 1;
+        }
+
+        whisper!(verbosity, AliasIcon::Success, "API Reload: {} macros injected.", count);
+        Ok(())
+    }
+
+    fn query_alias(name: &str, verbosity: &Verbosity) -> Vec<String> {
         trace!("query_alias entry for name: '{}'", name);
         let search_target = name.to_lowercase();
 
@@ -124,33 +268,7 @@ impl AliasProvider for Win32LibraryInterface {
         vec![text!(verbosity, AliasIcon::Alert, "'{}' not found in Win32 RAM.", name)]
     }
 
-    fn raw_set_macro(name: &str, value: Option<&str>) -> io::Result<bool> {
-        // 1. Clean the input to prevent Ghost Quotes in the Kernel
-        let n_wide: Vec<u16> = std::ffi::OsStr::new(name.trim_matches('"'))
-            .encode_wide().chain(Some(0)).collect();
-        let v_wide: Option<Vec<u16>> = value.map(|v| {
-            std::ffi::OsStr::new(v.trim_matches('"')).encode_wide().chain(Some(0)).collect()
-        });
-
-        unsafe {
-            let success = AddConsoleAliasW(
-                n_wide.as_ptr(),
-                v_wide.as_ref().map_or(std::ptr::null(), |v| v.as_ptr()),
-                get_target_exe_wide()
-            ) != 0;
-
-            if !success {
-                let code = GetLastError();
-                // This is the "Percolation": converting a Win32 code into a Rust IO Error
-                return Err(io::Error::new(
-                    io::ErrorKind::Other,
-                    format!("Win32 Kernel rejected alias (Error Code: {})", code)
-                ));
-            }
-            Ok(true)
-        }
-    }
-    fn set_alias(opts: SetOptions, path: &Path, verbosity: Verbosity) -> io::Result<()> {
+    fn set_alias(opts: SetOptions, path: &Path, verbosity: &Verbosity) -> io::Result<()> {
         let name = if opts.force_case { opts.name.clone() } else { opts.name.to_lowercase() };
         let val_opt = if opts.value.is_empty() { None } else { Some(opts.value.as_str()) };
 
@@ -168,59 +286,8 @@ impl AliasProvider for Win32LibraryInterface {
         whisper!(verbosity, AliasIcon::Success, "{} alias: {}", if opts.value.is_empty() { "Deleted" } else { "Set" }, name);
         Ok(())
     }
-    fn reload_full(path: &Path, verbosity: Verbosity) -> Result<(), Box<dyn std::error::Error>> {
-        let _ = Self::purge_ram_macros(verbosity);
 
-        // 1. Add '?' to percolate the error and get the Vec
-        // 2. Pass verbosity to match the new signature
-        let macros = parse_macro_file(path, verbosity)
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
-
-        let mut count = 0;
-        for (n, v) in macros {
-            // Use '?' here too to ensure we stop on a kernel failure
-            Self::raw_set_macro(&n, Some(&v))?;
-            count += 1;
-        }
-
-        whisper!(verbosity, AliasIcon::Success, "API Reload: {} macros injected.", count);
-        Ok(())
-    }
-    fn raw_reload_from_file(path: &Path) -> io::Result<()> {
-        // We pass Verbosity::silent() to satisfy the signature
-        let macros = parse_macro_file(path, Verbosity::silent())
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
-
-        for (n, v) in macros {
-            Self::raw_set_macro(&n, Some(&v))?;
-        }
-        Ok(())
-    }
-    fn purge_ram_macros(verbosity: Verbosity) -> io::Result<PurgeReport> {
-        let mut report = PurgeReport { cleared: Vec::new(), failed: Vec::new() };
-        // Now using ? on the getter
-        for (name, _) in Self::get_all_aliases(verbosity)? {
-            if Self::raw_set_macro(&name, None)? {
-                report.cleared.push(name);
-            } else {
-                report.failed.push((name, unsafe { GetLastError() }));
-            }
-        }
-        Ok(report)
-    }
-    fn write_autorun_registry(cmd: &str, _verbosity: Verbosity) -> io::Result<()> {
-        let hkcu = RegKey::predef(HKEY_CURRENT_USER);
-        let (key, _) = hkcu.create_subkey(REG_SUBKEY)?;
-        key.set_value(REG_AUTORUN_KEY, &cmd.to_string())
-    }
-    fn read_autorun_registry() -> String {
-        let hkcu = RegKey::predef(HKEY_CURRENT_USER);
-        // We open the key and get the value, defaulting to empty string on any error
-        hkcu.open_subkey(REG_SUBKEY)
-            .and_then(|key| key.get_value(REG_AUTORUN_KEY))
-            .unwrap_or_default()
-    }
-    fn run_diagnostics(path: &Path, verbosity: Verbosity) -> Result<(), Box<dyn std::error::Error>> {
+    fn run_diagnostics(path: &Path, verbosity: &Verbosity) -> Result<(), Box<dyn std::error::Error>> {
         let report = DiagnosticReport {
             binary_path: env::current_exe().ok(),
             resolved_path: path.to_path_buf(),
@@ -228,16 +295,29 @@ impl AliasProvider for Win32LibraryInterface {
             env_opts: env::var(ENV_ALIAS_OPTS).unwrap_or_else(|_| "NOT SET".to_string()),
             file_exists: path.exists(),
             is_readonly: path.metadata().map(|m| m.permissions().readonly()).unwrap_or(false),
-            drive_responsive: is_drive_responsive(path),
+            drive_responsive: is_drive_responsive(path, IO_RESPONSIVENESS_THRESHOLD),
             registry_status: check_registry_native(),
-            api_status: Some(if is_api_responsive() { "CONNECTED (Win32 API)".to_string() } else { "FAILED".to_string() }),
+            api_status: Some(if Self::is_api_responsive(IO_RESPONSIVENESS_THRESHOLD) { "CONNECTED (Win32 API)".to_string() } else { "FAILED".to_string() }),
         };
         render_diagnostics(report, verbosity);
         Ok(())
     }
-    fn alias_show_all(verbosity: Verbosity) -> Result<(), Box<dyn std::error::Error>> {
+
+    fn alias_show_all(verbosity: &Verbosity) -> Result<(), Box<dyn std::error::Error>> {
         let os_pairs = Self::get_all_aliases(verbosity)?;
         perform_audit(os_pairs, verbosity)
+    }
+
+    fn provider_type() -> ProviderType {
+        ProviderType::Win32
+    }
+
+    fn is_api_responsive(timeout: Duration) -> bool {
+        timeout_guard(timeout, || {
+            let name = get_test_silo_name() + "\0";
+            unsafe { GetConsoleAliasesLengthA(name.as_ptr()) };
+            true // If it didn't hang, it's responsive
+        }).unwrap_or(false)
     }
 }
 
@@ -260,10 +340,4 @@ fn check_registry_native() -> RegistryStatus {
     }
 }
 
-fn is_api_responsive() -> bool {
-    let name = get_test_silo_name() + "\0";
-    unsafe {
-        let len = GetConsoleAliasesLengthA(name.as_ptr());
-        len > 0 || len == 0
-    }
-}
+

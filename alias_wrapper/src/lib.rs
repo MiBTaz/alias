@@ -4,13 +4,14 @@ use std::{env, io};
 use std::error::Error;
 use std::path::Path;
 use std::process::Command;
+use std::time::Duration;
 use alias_lib::*;
 
 pub struct WrapperLibraryInterface;
 
 impl alias_lib::AliasProvider for WrapperLibraryInterface {
-    /// UPDATED: Now returns io::Result to match the AliasProvider trait.
-    fn get_all_aliases(_verbosity: Verbosity) -> io::Result<Vec<(String, String)>> {
+
+    fn get_all_aliases(_verbosity: &Verbosity) -> io::Result<Vec<(String, String)>> {
         let output = Command::new("doskey")
             .arg("/macros:cmd.exe")
             .output()
@@ -42,7 +43,7 @@ impl alias_lib::AliasProvider for WrapperLibraryInterface {
         Ok(list)
     }
 
-    fn query_alias(name: &str, verbosity: Verbosity) -> Vec<String> {
+    fn query_alias(name: &str, verbosity: &Verbosity) -> Vec<String> {
         trace!("Querying for: {:?} (len: {})", name, name.len());
         let search_target = name.to_lowercase();
 
@@ -91,7 +92,7 @@ impl alias_lib::AliasProvider for WrapperLibraryInterface {
         Ok(true)
     }
 
-    fn set_alias(opts: SetOptions, path: &Path, verbosity: Verbosity) -> io::Result<()> {
+    fn set_alias(opts: SetOptions, path: &Path, verbosity: &Verbosity) -> io::Result<()> {
         let name = if opts.force_case { opts.name.clone() } else { opts.name.to_lowercase() };
 
         if name.is_empty() {
@@ -112,7 +113,7 @@ impl alias_lib::AliasProvider for WrapperLibraryInterface {
         Ok(())
     }
 
-    fn raw_reload_from_file(path: &Path) -> io::Result<()> {
+    fn raw_reload_from_file(_verbosity: &Verbosity, path: &Path) -> io::Result<()> {
         let status = Command::new("doskey")
             .arg(format!("/macrofile={}", path.display()))
             .status()
@@ -128,7 +129,7 @@ impl alias_lib::AliasProvider for WrapperLibraryInterface {
         Ok(())
     }
 
-    fn write_autorun_registry(cmd: &str, verbosity: Verbosity) -> io::Result<()> {
+    fn write_autorun_registry(cmd: &str, verbosity: &Verbosity) -> io::Result<()> {
         let hkcu = winreg::RegKey::predef(winreg::enums::HKEY_CURRENT_USER);
         let (key, _) = hkcu.create_subkey(REG_SUBKEY)
             .map_err(|e| io::Error::new(e.kind(), failure!(verbosity, e).message))?;
@@ -156,7 +157,7 @@ impl alias_lib::AliasProvider for WrapperLibraryInterface {
             .unwrap_or_default()
     }
 
-    fn run_diagnostics(path: &Path, verbosity: Verbosity) -> Result<(), Box<dyn Error>> {
+    fn run_diagnostics(path: &Path, verbosity: &Verbosity) -> Result<(), Box<dyn Error>> {
         let report = DiagnosticReport {
             binary_path: env::current_exe().ok(),
             resolved_path: path.to_path_buf(),
@@ -164,7 +165,7 @@ impl alias_lib::AliasProvider for WrapperLibraryInterface {
             env_opts: env::var(ENV_ALIAS_OPTS).unwrap_or_else(|_| "NOT SET".into()),
             file_exists: path.exists(),
             is_readonly: path.metadata().map(|m| m.permissions().readonly()).unwrap_or(false),
-            drive_responsive: is_drive_responsive(path),
+            drive_responsive: is_drive_responsive(path, IO_RESPONSIVENESS_THRESHOLD),
             registry_status: check_registry_wrapper(),
             api_status: Some("SPAWNER (doskey.exe)".into()),
         };
@@ -172,12 +173,16 @@ impl alias_lib::AliasProvider for WrapperLibraryInterface {
         Ok(())
     }
 
-    fn alias_show_all(verbosity: Verbosity) -> Result<(), Box<dyn std::error::Error>> {
+    fn alias_show_all(verbosity: &Verbosity) -> Result<(), Box<dyn std::error::Error>> {
         // FIX: Extract the Vec from the Result using '?'
         let os_aliases = Self::get_all_aliases(verbosity)?;
 
         // Perform the audit and percolate any error immediately
         alias_lib::perform_audit(os_aliases, verbosity)
+    }
+    fn provider_type() -> ProviderType { ProviderType::Wrapper  }
+    fn is_api_responsive(_timeout: Duration) -> bool {
+        true
     }
 }
 
@@ -191,3 +196,4 @@ fn check_registry_wrapper() -> RegistryStatus {
         RegistryStatus::Mismatch("Found other AutoRun commands".into())
     }
 }
+

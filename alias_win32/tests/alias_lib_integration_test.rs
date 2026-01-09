@@ -1,6 +1,7 @@
 // alias_win32/tests/tests.rs
 
 // 1. Pull in the public API of the library
+#[allow(unused_imports)]
 use alias_lib::*;
 // use alias_win32::*;
 

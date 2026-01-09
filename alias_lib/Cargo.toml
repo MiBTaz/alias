@@ -7,3 +7,11 @@ edition = "2024"
 [dev-dependencies]
 # This ensures alias_nuke is built before any lib tests run
 alias_nuke = { path = "../alias_nuke" }
+serial_test = "3.1.1"
+
+[dependencies]
+tempfile = "3.24.0"
+
+
+[features]
+test-utils = []

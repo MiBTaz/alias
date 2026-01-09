@@ -30,7 +30,7 @@ fn test_win32_api_roundtrip() {
 
     // Call via the Interface
     Win32LibraryInterface::raw_set_macro(name, Some(val)).unwrap();
-    let all = Win32LibraryInterface::get_all_aliases(voice!(Silent, Off, Off)).expect("RAM fetch failed");
+    let all = Win32LibraryInterface::get_all_aliases(&voice!(Silent, Off, Off)).expect("RAM fetch failed");
     let found = all.iter().find(|(n, _)| n == name);
 
     assert!(found.is_some());
@@ -43,12 +43,12 @@ fn test_routine_clear_ram() {
     let name = "purge_me";
     Win32LibraryInterface::raw_set_macro(name, Some("temporary")).unwrap();
 
-    let report = Win32LibraryInterface::purge_ram_macros(voice!(Silent, Off, Off)).expect("Purge failed");
+    let report = Win32LibraryInterface::purge_ram_macros(&voice!(Silent, Off, Off)).expect("Purge failed");
 
     assert!(report.cleared.iter().any(|n| n.to_lowercase() == name.to_lowercase()),
             "Purge did not report clearing our test key");
 
-    let results = Win32LibraryInterface::query_alias(name, Verbosity::normal());
+    let results = Win32LibraryInterface::query_alias(name, &Verbosity::normal());
     // Since query_alias returns Vec<String>, check for content or lack thereof
     assert!(results.iter().all(|s| !s.contains("temporary")));
 }
@@ -57,9 +57,9 @@ fn test_routine_clear_ram() {
 #[serial]
 fn test_routine_purge_ram() {
     Win32LibraryInterface::raw_set_macro("purge_target", Some("alive")).unwrap();
-    let _ = Win32LibraryInterface::purge_ram_macros(voice!(Silent, Off, Off)).expect("Purge failed");
+    let _ = Win32LibraryInterface::purge_ram_macros(&voice!(Silent, Off, Off)).expect("Purge failed");
 
-    let query = Win32LibraryInterface::query_alias("purge_target", Verbosity::normal());
+    let query = Win32LibraryInterface::query_alias("purge_target", &Verbosity::normal());
 
     // Use a more flexible check that matches your text! output
     assert!(query.get(0).map_or(false, |s| s.contains("not a known alias") || s.contains("not found")));
@@ -77,10 +77,10 @@ fn test_win32_rapid_fire_sync() {
             volatile: false,
             force_case: false,
         };
-        Win32LibraryInterface::set_alias(opts, &path, Verbosity::normal()).expect("Rapid fire set failed");
+        Win32LibraryInterface::set_alias(opts, &path, &Verbosity::normal()).expect("Rapid fire set failed");
     }
 
-    let all = Win32LibraryInterface::get_all_aliases(voice!(Silent, Off, Off)).expect("RAM fetch failed");
+    let all = Win32LibraryInterface::get_all_aliases(&voice!(Silent, Off, Off)).expect("RAM fetch failed");
     for i in 0..20 {
         let name = format!("stress_test_{}", i);
         assert!(all.iter().any(|(n, _)| n == &name), "Missing alias {}", name);
@@ -97,7 +97,7 @@ fn test_win32_international_roundtrip() {
 
     assert!(Win32LibraryInterface::raw_set_macro(name, Some(val)).unwrap(), "Failed to set international alias");
 
-    let all = Win32LibraryInterface::get_all_aliases(voice!(Silent, Off, Off)).expect("RAM fetch failed");
+    let all = Win32LibraryInterface::get_all_aliases(&voice!(Silent, Off, Off)).expect("RAM fetch failed");
     let found = all.iter().find(|(n, _)| n == name);
 
     assert!(found.is_some(), "International alias 'λ' was mangled or lost");
@@ -118,7 +118,7 @@ fn test_registry_append_logic_library() {
     let original_cmd = "echo 'Old Command'";
     key.set_value(REG_AUTORUN_KEY, &original_cmd.to_string()).unwrap();
 
-    Win32LibraryInterface::write_autorun_registry(&format!("{} & alias --reload", original_cmd), Verbosity::normal()).expect("Install failed");
+    Win32LibraryInterface::write_autorun_registry(&format!("{} & alias --reload", original_cmd), &Verbosity::normal()).expect("Install failed");
 
     let result: String = key.get_value(REG_AUTORUN_KEY).unwrap();
     assert!(result.contains(original_cmd));
@@ -126,14 +126,14 @@ fn test_registry_append_logic_library() {
 }
 
 #[test]
-fn test_thread_silo_isolation() {
+fn test_thread_silo_isolation_local() {
     let name_a = "unique_silo_test_a";
     let name_b = "unique_silo_test_b";
 
     Win32LibraryInterface::raw_set_macro(name_a, Some("val_a")).unwrap();
     Win32LibraryInterface::raw_set_macro(name_b, Some("val_b")).unwrap();
 
-    let all = Win32LibraryInterface::get_all_aliases(voice!(Silent, Off, Off)).expect("RAM fetch failed");
+    let all = Win32LibraryInterface::get_all_aliases(&voice!(Silent, Off, Off)).expect("RAM fetch failed");
 
     assert!(all.iter().any(|(n, _)| n == name_a));
     assert!(all.iter().any(|(n, _)| n == name_b));

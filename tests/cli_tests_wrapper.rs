@@ -16,7 +16,7 @@ fn test_voice_masking_consistency() {
     let name = "wrapper_internal_test";
 
     // Test if the wrapper can handle a query silently
-    let results = P::query_alias(name, v);
+    let results = P::query_alias(name, &v);
     assert!(results.is_empty() || !results[0].contains("DEBUG"),
             "Wrapper leaked trace info in Silent mode");
 }
