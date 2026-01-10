@@ -9,7 +9,84 @@ use alias_lib::*;
 
 pub struct WrapperLibraryInterface;
 
+// ... (imports remain the same)
+
 impl alias_lib::AliasProvider for WrapperLibraryInterface {
+/*
+    // SYNCED: No more trimming. Let the command pass through raw.
+    fn raw_set_macro(name: &str, value: Option<&str>) -> io::Result<bool> {
+        let val = value.unwrap_or("");
+        // Remove the .trim_matches('"') calls to match Win32's "Raw" philosophy
+        let status = Command::new("doskey")
+            .args(["/exename=cmd.exe", &format!("{}={}", name.trim(), val.trim())])
+            .status()
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+
+        Ok(status.success())
+    }
+*/
+    // SYNCED: Use the same Highlander deduplication logic
+    fn write_autorun_registry(cmd: &str, verbosity: &Verbosity) -> io::Result<()> {
+        let hkcu = winreg::RegKey::predef(winreg::enums::HKEY_CURRENT_USER);
+        let (key, _) = hkcu.create_subkey(REG_SUBKEY)?;
+        let raw_existing: String = key.get_value(REG_AUTORUN_KEY).unwrap_or_default();
+
+        let my_stem = env::current_exe()?
+            .file_stem()
+            .and_then(|n| n.to_str())
+            .unwrap_or("alias")
+            .to_lowercase();
+
+        let mut entries: Vec<String> = raw_existing
+            .split('&')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+
+        let mut first_match_found = false;
+
+        entries.retain_mut(|entry| {
+            let clean_entry = entry.to_lowercase().replace('\"', "");
+            if clean_entry.contains(&my_stem) && (clean_entry.contains("--startup") || clean_entry.contains("--file")) {
+                if !first_match_found {
+                    *entry = cmd.to_string(); // SWAP
+                    first_match_found = true;
+                    true
+                } else {
+                    false // DEDUPLICATE
+                }
+            } else {
+                true
+            }
+        });
+
+        if !first_match_found { entries.push(cmd.to_string()); }
+
+        let final_val = entries.join(" & ");
+        key.set_value(REG_AUTORUN_KEY, &final_val)?;
+        shout!(verbosity, AliasIcon::Success, "AutoRun synchronized (Wrapper-mode).");
+        Ok(())
+    }
+
+    // ADDED: Missing trait method to match Win32
+    fn purge_ram_macros(verbosity: &Verbosity) -> io::Result<PurgeReport> {
+        let mut report = PurgeReport { cleared: Vec::new(), failed: Vec::new() };
+        for (name, _) in Self::get_all_aliases(verbosity)? {
+            if Self::raw_set_macro(&name, None)? {
+                report.cleared.push(name);
+            } else {
+                report.failed.push((name, 0)); // No GetLastError for wrapper
+            }
+        }
+        Ok(report)
+    }
+
+    // ADDED: Missing trait method to match Win32
+    fn reload_full(path: &Path, verbosity: &Verbosity) -> Result<(), Box<dyn std::error::Error>> {
+        Self::raw_reload_from_file(verbosity, path)?;
+        whisper!(verbosity, AliasIcon::Success, "Doskey Wrapper: Reloaded from {}", path.display());
+        Ok(())
+    }
 
     fn get_all_aliases(_verbosity: &Verbosity) -> io::Result<Vec<(String, String)>> {
         let output = Command::new("doskey")
@@ -71,7 +148,7 @@ impl alias_lib::AliasProvider for WrapperLibraryInterface {
         }
         vec![]
     }
-
+// old
     fn raw_set_macro(name: &str, value: Option<&str>) -> io::Result<bool> {
         let val = value.unwrap_or("");
         let clean_name = name.trim_matches('"');
@@ -127,27 +204,6 @@ impl alias_lib::AliasProvider for WrapperLibraryInterface {
             return Err(io::Error::new(io::ErrorKind::Other, err_box.message));
         }
         Ok(())
-    }
-
-    fn write_autorun_registry(cmd: &str, verbosity: &Verbosity) -> io::Result<()> {
-        let hkcu = winreg::RegKey::predef(winreg::enums::HKEY_CURRENT_USER);
-        let (key, _) = hkcu.create_subkey(REG_SUBKEY)
-            .map_err(|e| io::Error::new(e.kind(), failure!(verbosity, e).message))?;
-
-        let existing: String = key.get_value(REG_AUTORUN_KEY).unwrap_or_default();
-        if existing.contains(cmd) {
-            say!(verbosity, AliasIcon::Info, "AutoRun hook is already up to date.");
-            return Ok(());
-        }
-
-        let new_val = if existing.is_empty() {
-            cmd.to_string()
-        } else {
-            format!("{} & {}", existing, cmd)
-        };
-
-        key.set_value(REG_AUTORUN_KEY, &new_val)
-            .map_err(|e| io::Error::new(e.kind(), failure!(verbosity, e).message))
     }
 
     fn read_autorun_registry() -> String {

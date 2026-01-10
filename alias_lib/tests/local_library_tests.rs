@@ -31,7 +31,9 @@ mod tests {
         fn get_all_aliases(_verbosity: &Verbosity) -> io::Result<Vec<(String, String)>> { Ok(vec![]) }
         fn write_autorun_registry(_: &str, _: &Verbosity) -> io::Result<()> { Ok(()) }
         fn read_autorun_registry() -> String { String::new() }
-
+        fn reload_full(path: &Path, verbosity: &Verbosity) -> Result<(), Box<dyn std::error::Error>> {
+            return Ok(())
+        }
         // 2. CENTRALIZED LOGIC HOOKS
         fn query_alias(_: &str, _: &Verbosity) -> Vec<String> { vec![] }
 

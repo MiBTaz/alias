@@ -3,11 +3,12 @@
 use std::{env, fmt};
 use std::fs;
 use std::io;
-use std::io::{Read, Write};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use std::collections::HashMap;
+use std::fs::File;
 use std::sync::{Arc, Mutex};
 use std::thread::sleep;
 
@@ -149,6 +150,7 @@ pub enum ErrorCode {
     Registry = 5,
     AccessDenied = 6,
     MissingName = 7,
+    UnknownFileType = 8,
 }
 
 #[derive(Debug, Clone)]
@@ -201,7 +203,6 @@ impl std::ops::Index<usize> for TaskQueue {
         &self.tasks[index]
     }
 }
-
 impl IntoIterator for TaskQueue {
     type Item = Task;
     type IntoIter = std::vec::IntoIter<Self::Item>;
@@ -211,20 +212,50 @@ impl IntoIterator for TaskQueue {
     }
 }
 
+pub enum BinarySubsystem {
+    Gui,
+    Cui,
+    Script,
+    Unavail,
+    Unknown,
+}
+
+pub struct BinaryProfile {
+    pub exe: PathBuf,
+    pub args: Vec<String>,
+    pub subsystem: BinarySubsystem,
+    pub is_32bit: bool,
+}
+
+impl BinaryProfile {
+    /// A "Safe" constructor for when things go wrong
+    pub fn fallback(name: &str) -> Self {
+        Self {
+            exe: PathBuf::from(name),
+            args: Vec::new(),
+            subsystem: BinarySubsystem::Cui,
+            is_32bit: false,
+        }
+    }
+}
+
 // --- Shared Constants ---
 pub const ENV_ALIAS_FILE: &str = "ALIAS_FILE";
 pub const ENV_ALIAS_OPTS: &str = "ALIAS_OPTS";
-pub const ENV_EDITOR: &str = "EDITOR";
-pub const ENV_VISUAL: &str = "VISUAL";
+const ENV_EDITOR: &str = "EDITOR";
+const ENV_VISUAL: &str = "VISUAL";
 pub const DEFAULT_ALIAS_FILENAME: &str = "aliases.doskey";
-pub const DEFAULT_APPDATA_ALIAS_DIR: &str = "alias_tool";
-pub const FALLBACK_EDITOR: &str = "notepad";
-pub const REG_CURRENT_USER: &str = "HKCU";
-pub const PATH_SEPARATOR: &str = "\\";
+const DEFAULT_APPDATA_ALIAS_DIR: &str = "alias_tool";
+const FALLBACK_EDITOR: &str = "notepad";
+const REG_CURRENT_USER: &str = "HKCU";
+const PATH_SEPARATOR: &str = "\\";
 pub const REG_SUBKEY: &str = "Software\\Microsoft\\Command Processor";
 pub const REG_AUTORUN_KEY: &str = "AutoRun";
 pub const IO_RESPONSIVENESS_THRESHOLD: Duration = Duration::from_millis(500);
-pub const PATH_RESPONSIVENESS_THRESHOLD: Duration = Duration::from_millis(50);
+const PATH_RESPONSIVENESS_THRESHOLD: Duration = Duration::from_millis(50);
+const DEFAULT_EXTS: &str = ".COM;.EXE;.BAT;.CMD;.VBS;.VBE;.JS;.JSE;.WSF;.WSH;.MSC";
+const DEFAULT_EXTS_EXE: &str = ".COM;.EXE;.SCR";
+
 // --- Output Identity Logic (The Matrix) ---
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -338,7 +369,7 @@ impl Verbosity {
         format!("{} {}", self.get_icon_str(icon), msg)
     }
 
-    pub fn tip(&self, msg: Option<&str>) {
+    fn tip(&self, msg: Option<&str>) {
         if self.show_tips == ShowTips::Off { return }
         if let Some(m) = msg {
             // We use Hint icon (💡) for tips
@@ -389,14 +420,14 @@ impl Verbosity {
         eprintln!("{}", msg);
     }
 
-    pub fn audit(&self, msg: &str) {
+    fn audit(&self, msg: &str) {
         if msg.is_empty() || self.level != VerbosityLevel::Loud { return }
         let formatted = self.icon_format(AliasIcon::Info, msg);
         if !self.emit(&formatted) {
             println!("{}", formatted);
         }
     }
-    pub fn with_buffer(buffer: Vec<u8>) -> Self {
+    fn with_buffer(buffer: Vec<u8>) -> Self {
         Self {
             level: VerbosityLevel::Loud,    // Full data output for testing
             show_icons: ShowFeature::Off,  // No icons (cleaner string matching)
@@ -406,7 +437,7 @@ impl Verbosity {
             writer: Some(Arc::new(Mutex::new(buffer))),
         }
     }
-    pub fn property(&self, label: &str, value: &str, width: usize, wdf: (bool, bool, bool)) {
+    fn property(&self, label: &str, value: &str, width: usize, wdf: (bool, bool, bool)) {
         if self.level == VerbosityLevel::Mute { return; }
 
         // Pad the label to the left, then the value
@@ -428,7 +459,7 @@ impl Verbosity {
         let msg = format!("{}{}", line, audit_block);
         if !self.emitln(&msg) { println!("{}", msg); }
     }
-    pub fn align(&self, name: &str, value: &str, width: usize, wdf: (bool, bool, bool)) {
+    fn align(&self, name: &str, value: &str, width: usize, wdf: (bool, bool, bool)) {
         if self.level == VerbosityLevel::Mute { return; }
 
         let display_val = if value.is_empty() { "<EMPTY>" } else { value };
@@ -651,19 +682,49 @@ pub trait AliasProvider {
         say!(verbosity, AliasIcon::Success, "Reload: {} macros injected.", count);
         Ok(())
     }
+
     fn install_autorun(verbosity: &Verbosity) -> io::Result<()> {
-        // 1. Check for the Global Source of Truth (Env Var)
+        // 1. Requirement: Get the exe being run
+        // Using your 'nofail' routine to get the current binary name
+        let current_exe_name = get_alias_exe_nofail(verbosity);
+        let full_exe_path = get_alias_exe()?; // The full PathBuf for fallback
+
+        // 2. Requirement: Identify if the exe is in the path
+        // We strip the extension for the search if it's a standard one
+        let search_name = Path::new(&current_exe_name)
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or(&current_exe_name);
+
+        // 1. Resolve our "Current Identity" (The binary actually running)
+        let current_canon: String = std::fs::canonicalize(&full_exe_path)
+            .map(normalize_path)
+            .unwrap_or_else(|_| normalize_path(full_exe_path.clone()));
+
+        // 2. Resolve the "System Identity" (What 'where alias' would find)
+        let call_identifier = if let Some(found_path) = find_executable(search_name) {
+            let system_found_canon: String = std::fs::canonicalize(&found_path)
+                .map(normalize_path)
+                .unwrap_or_else(|_| normalize_path(found_path));
+
+            // THE AUDIT: Are we the same file the system sees?
+            if current_canon == system_found_canon {
+                search_name.to_string() // Requirement Met: Use just the name
+            } else {
+                format!("\"{}\"", current_canon) // Different version: Use absolute path
+            }
+        } else {
+            format!("\"{}\"", current_canon) // Not in PATH: Use absolute path
+        };
+
+        // --- Start of existing ALIAS_FILE logic ---
         let env_var = std::env::var("ALIAS_FILE").ok();
         let mut startup_args = String::from("--startup");
 
-        // We check this now to see if we need to ask the user for a path
         if let Some(path) = env_var {
             say!(verbosity, AliasIcon::Info, "Detected ALIAS_FILE in environment: {}", path);
-            // Env is present, so the AutoRun command stays lean: "alias.exe --startup"
         } else {
             say!(verbosity, AliasIcon::Question, "ALIAS_FILE environment variable not found.");
-
-            // 2. Interactive Prompt
             print!("  > Enter path to store aliases (leave blank for default): ");
             let _ = std::io::stdout().flush();
             let mut input = String::new();
@@ -672,27 +733,16 @@ pub trait AliasProvider {
 
             if !input.is_empty() {
                 let path = PathBuf::from(input);
-
-                // 3. Validation & Creation (The 0-byte Touch)
                 if !path.exists() {
                     std::fs::File::create(&path)?;
-                    say!(verbosity, AliasIcon::File, "Created new alias file: {}", path.display());
                 }
-
-                // Canonicalize so the Registry doesn't get a relative path like ".\ali.txt"
                 let abs_path = std::fs::canonicalize(&path).unwrap_or(path);
-
-                // Explicitly bake the file path into the AutoRun command
                 startup_args = format!("--file \"{}\" --startup", abs_path.display());
-            } else {
-                // Defaulting logic (e.g., %USERPROFILE%\.aliases.txt)
-                say!(verbosity, AliasIcon::Info, "Proceeding with default path resolution.");
             }
         }
 
-        // 4. Construct the Final Command
-        let exe_path = get_alias_exe()?;
-        let our_cmd = format!("\"{}\" {}", exe_path.display(), startup_args);
+        // 4. Construct the Final Command based on Requirement 3
+        let our_cmd = format!("{} {}", call_identifier, startup_args);
 
         // 5. Final Write
         Self::write_autorun_registry(&our_cmd, verbosity)
@@ -1035,7 +1085,7 @@ pub fn is_valid_name(name: &str) -> bool {
     }
     false
 }
-pub fn is_valid_name_ascii(name: &str) -> bool {
+fn is_valid_name_ascii(name: &str) -> bool {
     if name.is_empty() { return false; }
 
     // An alias name with a space is technically "Corrupt"
@@ -1090,7 +1140,7 @@ pub fn get_alias_path() -> Option<PathBuf> {
         })
 }
 
-pub fn dump_alias_file(verbosity: &Verbosity) -> Result<Vec<(String, String)>, Box<dyn std::error::Error>> {
+fn dump_alias_file(verbosity: &Verbosity) -> Result<Vec<(String, String)>, Box<dyn std::error::Error>> {
     let path = get_alias_path().ok_or_else(|| {
         failure!(verbosity, ErrorCode::MissingFile, "Could not locate the alias configuration file.")
     })?;
@@ -1107,44 +1157,126 @@ pub fn dump_alias_file(verbosity: &Verbosity) -> Result<Vec<(String, String)>, B
     Ok(pairs)
 }
 
+
 pub fn open_editor(path: &Path, override_ed: Option<String>, verbosity: &Verbosity) -> io::Result<()> {
-    // 1. Resolution Chain (Priority: Override -> VISUAL -> EDITOR -> notepad)
-    let ed = override_ed
-        .or_else(|| env::var("VISUAL").ok())
-        .or_else(|| env::var("EDITOR").ok())
-        .unwrap_or_else(|| "notepad".to_string());
+    // 1. Resolve Preference (Handles Priority, Resolution, and PE Identification)
+    // This gives us the 'Soul' and the 'Intent'
+    let mut profile = get_editor_preference(verbosity, &override_ed);
 
-    // 2. Prepare the Path
-    // On Windows, some older editors (like notepad) handle absolute paths better
+    // 2. Canonicalize the target file (The file the user wants to edit)
     let absolute_path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
-    if !is_file_accessible(absolute_path.as_path()) {
-        return Err(io::Error::new(io::ErrorKind::Other, "File inaccessible; cannot open editor."));
-    }
-    verbosity.say(&format!("Launching {}...", ed));
 
-    // 3. The Execution
-    // We use a "Shell Spawn" approach for the primary editor because 'ed'
-    // might contain arguments (e.g. "code --wait")
-    let status = if cfg!(target_os = "windows") {
-        Command::new("cmd")
-            .args(["/C", &format!("{} \"{}\"", ed, absolute_path.display())])
-            .status()
-    } else {
-        Command::new(&ed)
-            .arg(&absolute_path)
-            .status()
+    // Safety Check
+    if !is_file_accessible(&absolute_path) {
+        return Err(io::Error::new(io::ErrorKind::Other, "Target file inaccessible."));
+    }
+
+    // 3. Prepare the Command Line
+    // We append the target file to the end of the existing editor args
+    profile.args.push(absolute_path.to_string_lossy().to_string());
+
+    say!(verbosity, &format!("Launching {}...", profile.args[0]));
+
+    // 4. Execution Triage
+    let status = match profile.subsystem {
+        BinarySubsystem::Gui => {
+            // GUI apps (VS Code, Notepad++): Launch directly
+            let mut cmd = Command::new(&profile.args[0]);
+            if profile.is_32bit {
+                cmd.env("__COMPAT_LAYER", "RunAsInvoker");
+            }
+            cmd.args(&profile.args[1..]).status()
+        }
+        _ => {
+            // CUI/Scripts/Unknown: Host via cmd /C for better terminal handling
+            let mut cmd = Command::new("cmd");
+            if profile.is_32bit {
+                cmd.env("__COMPAT_LAYER", "RunAsInvoker");
+            }
+            cmd.arg("/C")
+                .args(&profile.args) // Includes args[0] and our newly pushed path
+                .status()
+        }
     };
 
-    // 4. The Fail-Safe
+    // 5. The Fail-Safe (If the primary choice failed)
     if status.is_err() || !status.unwrap().success() {
         whisper!(verbosity, AliasIcon::Alert, "Primary editor failed. Falling back to notepad...");
-
         Command::new("notepad")
             .arg(&absolute_path)
             .status()?;
     }
 
     Ok(())
+}
+
+pub fn get_editor_preference(verbosity: &Verbosity, editor: &Option<String>) -> BinaryProfile {
+    // 1. Resolve to an owned String first (Fixes E0716)
+    let raw_ed = editor.clone()
+        .or_else(|| env::var(ENV_VISUAL).ok())
+        .or_else(|| env::var(ENV_EDITOR).ok())
+        .unwrap_or_else(|| FALLBACK_EDITOR.to_string());
+
+    // drop normalizing issues. shlex and win don't mind /
+    let normalized = raw_ed.replace('\\', "/");
+
+    // 2. Disassemble command from args (e.g., "code --wait")
+    let args = shlex::split(&normalized)
+        .filter(|p| !p.is_empty())
+        .unwrap_or_else(|| vec![FALLBACK_EDITOR.to_string()]);
+
+    // 3. Resolve the actual EXE path on disk
+    let cmd_name = args.get(0).cloned().unwrap_or_else(|| FALLBACK_EDITOR.to_string());
+    let exe_path = find_executable(&cmd_name).unwrap_or_else(|| PathBuf::from(&cmd_name));
+
+    // 4. Identify the binary's soul (Subsystem/Bitness)
+    let mut profile = identify_binary(verbosity, &exe_path)
+        .unwrap_or_else(|_| BinaryProfile::fallback(&exe_path.to_string_lossy()));
+
+    profile.args = args;
+    profile
+}
+
+pub fn find_executable(name: &str) -> Option<PathBuf> {
+    let p = PathBuf::from(name);
+
+    // 1. If it's already a full path or exists locally, stop here.
+    if p.is_file() {
+        return Some(p);
+    }
+
+    // 2. Fetch PATHEXT and PATH
+    let pathext_raw = env::var("PATHEXT").unwrap_or_else(|_| DEFAULT_EXTS.to_string());
+    let extensions: Vec<&str> = pathext_raw.split(';').collect();
+
+    // 3. The Search Gauntlet (The missing logic)
+    if let Ok(path_var) = env::var("PATH") {
+        for mut path_node in env::split_paths(&path_var) {
+            path_node.push(name);
+
+            // A. Exact match check (e.g., if the user provided "notepad.exe")
+            if path_node.is_file() {
+                return Some(path_node);
+            }
+
+            // B. Extension-appended check (e.g., for "notepad")
+            for ext in &extensions {
+                // TRAP FIX: Trim the dot so with_extension doesn't create ".."
+                let clean_ext = ext.trim_start_matches('.');
+                let with_ext = path_node.with_extension(clean_ext);
+                if with_ext.is_file() {
+                    return Some(with_ext);
+                }
+            }
+        }
+    }
+
+    None // Explicitly return None so the caller knows the search failed
+}
+
+pub fn normalize_path(path: PathBuf) -> String {
+    let s = path.to_string_lossy();
+    s.strip_prefix(r"\\?\").unwrap_or(&s).to_string()
 }
 
 pub fn parse_arguments(args: &[String]) -> (TaskQueue, Verbosity, Option<PathBuf>) {
@@ -1432,7 +1564,6 @@ where
     });
     rx.recv_timeout(timeout).ok()
 }
-
 pub fn calculate_new_file_state(original_content: &str, name: &str, value: &str) -> String {
     let mut lines: Vec<String> = original_content
         .lines()
@@ -1462,32 +1593,6 @@ pub fn calculate_new_file_state(original_content: &str, name: &str, value: &str)
         .filter(|l| !l.is_empty())
         .collect::<Vec<_>>()
         .join("\n")
-}
-
-pub fn render_diagnostics_simple(report: DiagnosticReport, verbosity: &Verbosity) {
-    whisper!(verbosity, AliasIcon::Tools, "--- Alias Tool Diagnostics ---");
-    let w = 15; // Width for the label column
-    let none = (false, false, false);
-
-    if let Some(p) = report.binary_path {
-        verbosity.property("Binary Loc", &p.to_string_lossy(), w, none);
-    }
-
-    verbosity.property("File Var", &report.env_file, w, none);
-    verbosity.property("Env Var", &report.env_opts, w, none);
-    verbosity.property("Resolved", &report.resolved_path.to_string_lossy(), w, none);
-
-    let file_status = if !report.file_exists {
-        text!(verbosity, AliasIcon::Fail, "MISSING")
-    } else {
-        text!(verbosity, AliasIcon::Ok, "WRITABLE")
-    };
-    verbosity.property("File Status", &file_status, w, none);
-
-    if report.drive_responsive {
-        // Here we use the icons to show "Win32, Doskey, File" are all happy
-        verbosity.property("Drive", "RESPONSIVE", w, none);
-    }
 }
 
 pub fn render_diagnostics(report: DiagnosticReport, verbosity: &Verbosity) {
@@ -1542,12 +1647,105 @@ pub fn render_diagnostics(report: DiagnosticReport, verbosity: &Verbosity) {
     whisper!(verbosity, AliasIcon::Info, "Diagnostic check complete.");
 }
 
-pub fn is_drive_responsive_local(path: &Path) -> bool {
-    // Attempt a tiny 1-byte read to verify the handle is actually alive
-    std::fs::File::open(path).and_then(|mut f| {
-        let mut buf = [0; 1];
-        f.read(&mut buf)
-    }).is_ok()
+pub fn identify_binary(_verbosity: &Verbosity, path: &Path) -> io::Result<BinaryProfile> {
+    // 1. Initialize the profile
+    let mut profile = BinaryProfile {
+        exe: path.to_path_buf(),
+        args: Vec::new(),
+        subsystem: BinarySubsystem::Cui, // Default
+        is_32bit: false,
+    };
+
+    // 2. The Gatekeeper (Retry logic/Accessibility)
+    if !is_file_accessible(path) {
+        profile.subsystem = BinarySubsystem::Unavail;
+        return Ok(profile);
+    }
+
+    // 3. Consolidated Triage
+    if let Some(ext_os) = path.extension() {
+        let ext = ext_with_dot(ext_os);
+        if is_script_extension(&ext) {
+            // Only short-circuit if it's NOT a binary container
+            if ext != ".exe" && ext != ".com" {
+                profile.subsystem = BinarySubsystem::Script;
+                return Ok(profile);
+            }
+        }
+    }
+
+    // 4. Delegate to the Deep Peeker (Only for binaries)
+    if let Ok((sub, is_32)) = peek_pe_metadata(path) {
+        profile.subsystem = sub;
+        profile.is_32bit = is_32;
+    }
+
+    Ok(profile)
+}
+
+pub fn is_exe_extension(ext: &str) -> bool {
+    let e = ext.to_lowercase();
+    // Check our hardcoded binary list
+    DEFAULT_EXTS_EXE.to_lowercase().split(';').any(|x| x == e)
+}
+
+pub fn is_script_extension(ext: &str) -> bool {
+    let e_lower = ext.to_lowercase();
+
+    // 1. Get the system list (which usually includes .EXE)
+    let pathext = std::env::var("PATHEXT")
+        .unwrap_or_else(|_| DEFAULT_EXTS.to_string())
+        .to_lowercase();
+
+    // 2. TRUE SCRIPTS = (Anything in PATHEXT) MINUS (Anything in our EXE list)
+    pathext.split(';').any(|e| e == e_lower) && !is_exe_extension(&e_lower)
+}
+
+pub fn ext_with_dot(ext_os: &std::ffi::OsStr) -> String {
+    let s = ext_os.to_string_lossy();
+    if s.starts_with('.') {
+        s.to_lowercase()
+    } else {
+        format!(".{}", s.to_lowercase())
+    }
+}
+
+pub fn peek_pe_metadata(path: &Path) -> io::Result<(BinarySubsystem, bool)> {
+    let mut file = File::open(path)?;
+    let mut buffer = [0u8; 64];
+
+    // Read DOS Header to find PE offset
+    file.read_exact(&mut buffer)?;
+    if &buffer[0..2] != b"MZ" {
+        return Ok((BinarySubsystem::Unknown, false));
+    }
+
+    let pe_offset = u32::from_le_bytes([buffer[60], buffer[61], buffer[62], buffer[63]]) as u64;
+    file.seek(SeekFrom::Start(pe_offset))?;
+
+    let mut pe_sig = [0u8; 4];
+    file.read_exact(&mut pe_sig)?;
+    if &pe_sig != b"PE\0\0" {
+        return Ok((BinarySubsystem::Unknown, false));
+    }
+
+    // Machine type check (32 vs 64 bit)
+    let mut machine_buf = [0u8; 2];
+    file.read_exact(&mut machine_buf)?;
+    let is_32bit = u16::from_le_bytes(machine_buf) == 0x014c;
+
+    // Subsystem check (GUI vs CUI)
+    file.seek(SeekFrom::Current(18 + 68))?;
+    let mut sub_buf = [0u8; 2];
+    file.read_exact(&mut sub_buf)?;
+
+    let subsystem = match u16::from_le_bytes(sub_buf) {
+        2 => BinarySubsystem::Gui,
+        3 => BinarySubsystem::Cui,
+        _ => BinarySubsystem::Unknown,
+    };
+
+    Ok((subsystem, is_32bit))
 }
 
 pub fn is_drive_responsive(path: &Path, timeout: Duration) -> bool {
@@ -1560,7 +1758,7 @@ pub fn is_drive_responsive(path: &Path, timeout: Duration) -> bool {
     }).is_some()
 }
 
-pub fn is_path_viable(path: &Path) -> bool {
+fn is_path_viable(path: &Path) -> bool {
     // 1. First Check: Is the hardware/OS actually responding for this path?
     // Use your 50ms timeout guard to prevent hangs and catch locks.
     if !is_drive_responsive(path, PATH_RESPONSIVENESS_THRESHOLD) {
@@ -1572,7 +1770,7 @@ pub fn is_path_viable(path: &Path) -> bool {
     is_path_healthy(path)
 }
 
-pub fn can_path_exist(path: &Path) -> bool {
+fn can_path_exist(path: &Path) -> bool {
     // 1. If the file doesn't exist on disk yet
     if !path.exists() {
         if let Some(parent) = path.parent() {
@@ -1594,7 +1792,7 @@ pub fn can_path_exist(path: &Path) -> bool {
     true
 }
 
-pub fn resolve_viable_path(path: &Path) -> bool {
+fn resolve_viable_path(path: &Path) -> bool {
     // 1. Force Canonicalization
     // This turns short-names into long-names and validates the route
     let canonical = match path.canonicalize() {
@@ -1614,7 +1812,7 @@ pub fn resolve_viable_path(path: &Path) -> bool {
     }
 }
 
-pub fn is_file_accessible(path: &Path) -> bool {
+fn is_file_accessible(path: &Path) -> bool {
     let mut retries = 3;
 
     while retries > 0 {
@@ -1637,18 +1835,6 @@ pub fn is_file_accessible(path: &Path) -> bool {
         }
     }
     false
-}
-
-pub fn perform_autorun_install<P: AliasProvider>(verbosity: &Verbosity) -> io::Result<()> {
-    let path = get_alias_path().ok_or_else(|| {
-        io::Error::new(io::ErrorKind::NotFound, "No alias file found. Set ALIAS_FILE.")
-    })?;
-
-    let exe_path = get_alias_exe()?;
-    let our_cmd = format!("\"{}\" --reload --file \"{}\"", exe_path.display(), path.display());
-
-    // This is now a static call to the type P
-    P::write_autorun_registry(&our_cmd, verbosity)
 }
 
 pub fn random_num_bounded(limit: usize) -> usize {
@@ -1699,7 +1885,7 @@ pub fn get_alias_exe() -> io::Result<std::path::PathBuf> {
     })
 }
 
-pub fn get_alias_exe_nofail(verbosity: &Verbosity) -> String {
+fn get_alias_exe_nofail(verbosity: &Verbosity) -> String {
     match get_alias_exe() {
         Ok(p) => p.file_name()
             .map(|s| s.to_string_lossy().into_owned())
@@ -1712,7 +1898,7 @@ pub fn get_alias_exe_nofail(verbosity: &Verbosity) -> String {
     }
 }
 
-pub fn print_help(verbosity: &Verbosity, mode: HelpMode, path: Option<&Path>) {
+fn print_help(verbosity: &Verbosity, mode: HelpMode, path: Option<&Path>) {
     let exe_name = get_alias_exe_nofail(verbosity);
     shout!(verbosity, AliasIcon::Info, "ALIAS ({}) - High-speed alias management", exe_name);
     say!(verbosity, AliasIcon::None, r#"

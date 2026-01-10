@@ -110,7 +110,8 @@ impl AliasProvider for Win32LibraryInterface {
 
             loop {
                 // Allocate u16 buffer (2 bytes per element)
-                buffer = vec![0u16; (len_bytes / 2) as usize];
+                let buffer_size_u16 = (len_bytes as usize + 1) / 2; // Round up
+                buffer = vec![0u16; buffer_size_u16];
                 read_bytes = GetConsoleAliasesW(buffer.as_mut_ptr(), len_bytes, exe_name);
 
                 if read_bytes > 0 {
@@ -131,7 +132,8 @@ impl AliasProvider for Win32LibraryInterface {
             }
 
             // Slice only the bytes actually read
-            let wide_slice = &buffer[.. (read_bytes / 2) as usize];
+            let u16_len = (read_bytes as usize + 1) / 2;
+            let wide_slice = &buffer[..u16_len];
 
             let list: Vec<(String, String)> = String::from_utf16_lossy(wide_slice)
                 .split('\0')
@@ -144,15 +146,17 @@ impl AliasProvider for Win32LibraryInterface {
         let hkcu = RegKey::predef(HKEY_CURRENT_USER);
         let (key, _) = hkcu.create_subkey(REG_SUBKEY)?;
 
+        // 1. Get existing AutoRun string (e.g., "clink inject --profile ... & alias --startup")
         let raw_existing: String = key.get_value(REG_AUTORUN_KEY).unwrap_or_default();
 
-        // Identify ourselves ruggedly (current binary name)
-        let my_name = env::current_exe()?
-            .file_name()
+        // 2. Identify ourselves by the file stem (e.g., "alias") to be rugged
+        let my_stem = env::current_exe()?
+            .file_stem()
             .and_then(|n| n.to_str())
-            .unwrap_or("alias.exe")
+            .unwrap_or("alias")
             .to_lowercase();
 
+        // 3. Parse existing commands into a vector
         let mut entries: Vec<String> = raw_existing
             .split('&')
             .map(|s| s.trim().to_string())
@@ -161,28 +165,34 @@ impl AliasProvider for Win32LibraryInterface {
 
         let mut first_match_found = false;
 
-        // Use retain to filter in-place:
-        // 1. If it's not us, keep it.
-        // 2. If it IS us, and it's the FIRST time, swap it and keep it.
-        // 3. If it IS us, and we already found a match, discard it (Deduplicate).
+        // 4. The "Highlander" Deduplication Logic:
+        // We iterate through and keep only the first instance of 'alias',
+        // replacing its content with the new command and dropping subsequent duplicates.
         entries.retain_mut(|entry| {
-            if entry.to_lowercase().contains(&my_name) {
+            let entry_lower = entry.to_lowercase();
+            // Strip quotes for a clean comparison against the stem
+            let clean_entry = entry_lower.replace('\"', "");
+
+            // Check if this entry belongs to us (alias) and looks like a setup command
+            if clean_entry.contains(&my_stem) && (clean_entry.contains("--startup") || clean_entry.contains("--file")) {
                 if !first_match_found {
-                    *entry = cmd.to_string(); // SWAP
+                    *entry = cmd.to_string(); // SWAP existing entry with current command
                     first_match_found = true;
-                    true // Keep the first (now updated) match
+                    true // Keep the first one we found (now updated)
                 } else {
-                    false // Drop subsequent matches (Clean up the leak)
+                    false // KILL THE GHOSTS (discard any secondary alias entries)
                 }
             } else {
-                true // Keep other tools (Clink, etc.)
+                true // Leave other tools (like Clink or prompt mods) alone
             }
         });
 
+        // 5. If we weren't in the registry at all, append ourselves to the end
         if !first_match_found {
-            entries.push(cmd.to_string()); // APPEND only if we weren't there
+            entries.push(cmd.to_string());
         }
 
+        // 6. Reconstruct the command string and commit to the Registry
         let final_val = entries.join(" & ");
         key.set_value(REG_AUTORUN_KEY, &final_val)?;
 
@@ -212,8 +222,6 @@ impl AliasProvider for Win32LibraryInterface {
     }
 
     fn reload_full(path: &Path, verbosity: &Verbosity) -> Result<(), Box<dyn std::error::Error>> {
-        let _ = Self::purge_ram_macros(verbosity);
-
         // 1. Add '?' to percolate the error and get the Vec
         // 2. Pass verbosity to match the new signature
         let macros = parse_macro_file(path, verbosity)

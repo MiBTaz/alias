@@ -1,4 +1,5 @@
 use std::io;
+use std::path::Path;
 use std::sync::Mutex;
 use serial_test::serial;
 use alias_lib::{AliasProvider, SetOptions, Verbosity};
@@ -46,7 +47,7 @@ impl AliasProvider for MockProvider {
 
  */
 
-    fn write_autorun_registry(_: &str, _: &Verbosity) -> io::Result<()> { Ok(()) }
+        fn write_autorun_registry(_: &str, _: &Verbosity) -> io::Result<()> { Ok(()) }
 
     // MATCH: Returns String directly, not Result
     fn read_autorun_registry() -> String { String::new() }
@@ -1907,3 +1908,131 @@ mod battery_20 {
         }
     }
 }
+
+#[cfg(test)]
+mod intelligence_tests {
+    use super::*;
+    use std::fs::File;
+    use std::io::Write;
+    use tempfile::tempdir;
+    use alias_lib::{ext_with_dot, identify_binary, is_script_extension, peek_pe_metadata, BinarySubsystem};
+
+    #[test]
+    fn test_ext_with_dot_normalization() {
+        assert_eq!(ext_with_dot(std::ffi::OsStr::new("exe")), ".exe");
+        assert_eq!(ext_with_dot(std::ffi::OsStr::new(".BAT")), ".bat"); // Case & Dot check
+        assert_eq!(ext_with_dot(std::ffi::OsStr::new("")), ".");
+    }
+
+    #[test]
+    fn test_is_script_extension() {
+        assert!(is_script_extension(".bat"));
+        assert!(is_script_extension(".cmd"));
+        assert!(is_script_extension(".vbs"));
+        assert!(!is_script_extension(".exe")); // Binary, not script
+        assert!(!is_script_extension(".txt")); // Text, not executable script
+    }
+
+    #[test]
+    fn test_identify_binary_script_triage() {
+        let dir = tempdir().unwrap();
+        let script_path = dir.path().join("test.bat");
+        File::create(&script_path).unwrap();
+
+        let verbosity = Verbosity::mute();
+        let profile = identify_binary(&verbosity, &script_path).unwrap();
+
+        assert!(matches!(profile.subsystem, BinarySubsystem::Script));
+        assert_eq!(profile.exe, script_path);
+    }
+
+    #[test]
+    fn test_peek_pe_metadata_invalid_files() {
+        let dir = tempdir().unwrap();
+        let txt_path = dir.path().join("fake.exe");
+        let mut f = File::create(&txt_path).unwrap();
+        f.write_all(b"Not an MZ header").unwrap();
+
+        // Should fail because it doesn't start with "MZ"
+        let result = peek_pe_metadata(&txt_path);
+        assert!(result.is_err());
+    }
+}
+
+#[cfg(test)]
+mod intent_tests {
+    use super::*;
+    use std::env;
+    use alias_lib::{find_executable, get_editor_preference};
+
+    #[test]
+    fn test_get_editor_preference_override() {
+        let verbosity = Verbosity::mute();
+        let override_cmd = Some("code --wait".to_string());
+
+        let profile = get_editor_preference(&verbosity, &override_cmd);
+
+        // Should split arguments correctly
+        assert_eq!(profile.args[0], "code");
+        assert_eq!(profile.args[1], "--wait");
+    }
+
+    #[test]
+    fn test_get_editor_preference_env_priority() {
+        let verbosity = Verbosity::mute();
+
+        // Set environment
+        unsafe {
+            env::set_var("VISUAL", "vim");
+            env::set_var("EDITOR", "nano");
+        }
+
+        let profile = get_editor_preference(&verbosity, &None);
+
+        // VISUAL has priority over EDITOR
+        assert_eq!(profile.args[0], "vim");
+
+        unsafe {
+            env::remove_var("VISUAL");
+        }
+        let profile_2 = get_editor_preference(&verbosity, &None);
+        assert_eq!(profile_2.args[0], "nano");
+    }
+
+    #[test]
+    fn test_find_executable_path_logic() {
+        // This test assumes 'notepad.exe' exists in C:\Windows\System32
+        // which is standard for Windows environments.
+        let result = find_executable("notepad");
+        assert!(result.is_some());
+        assert!(result.unwrap().to_string_lossy().to_lowercase().contains("notepad.exe"));
+    }
+}
+
+#[cfg(test)]
+mod integration_tests {
+    use super::*;
+    use std::path::PathBuf;
+    use alias_lib::{open_editor, BinaryProfile, BinarySubsystem};
+
+    #[test]
+    fn test_open_editor_inaccessible_target() {
+        let verbosity = Verbosity::mute();
+        let non_existent = PathBuf::from("Z:\\this\\does\\not\\exist.txt");
+
+        let result = open_editor(&non_existent, None, &verbosity);
+
+        // Should return an error because the file doesn't exist
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().to_string(), "Target file inaccessible.");
+    }
+
+    #[test]
+    fn test_binary_profile_fallback() {
+        let profile = BinaryProfile::fallback("dummy.exe");
+        assert_eq!(profile.exe, PathBuf::from("dummy.exe"));
+        assert!(matches!(profile.subsystem, BinarySubsystem::Cui));
+        assert_eq!(profile.is_32bit, false);
+    }
+}
+

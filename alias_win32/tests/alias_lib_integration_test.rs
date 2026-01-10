@@ -1,4 +1,4 @@
-// alias_win32/tests/tests.rs
+// alias_win32/tests/alias_lib_integration_test.rs
 
 // 1. Pull in the public API of the library
 #[allow(unused_imports)]
