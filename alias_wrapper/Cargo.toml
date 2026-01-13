@@ -14,6 +14,7 @@ serial_test = "3.1.1"
 alias_nuke = { path = "../alias_nuke" }
 assert_cmd = "2.0"
 ctor = "0.6.3"
+function_name = "0.3.0"
 
 [features]
 test_utils = []

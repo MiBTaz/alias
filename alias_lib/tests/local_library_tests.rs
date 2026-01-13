@@ -409,7 +409,14 @@ mod parse_and_action {
         } else { panic!(); }
     }
     #[test]
-    fn t5_delete_syntax() { if let AliasAction::Set(o) = parse_arguments(&to_args(vec!["alias", "x="])).0.pull().unwrap().action { assert_eq!(o.value, ""); } else { panic!(); } }
+    fn t5_delete_syntax() {
+        // Expect Remove("x") instead of Set(o) with value ""
+        if let AliasAction::Remove(name) = parse_arguments(&to_args(vec!["alias", "x="])).0.pull().unwrap().action {
+            assert_eq!(name, "x");
+        } else {
+            panic!("Expected AliasAction::Remove for 'x=' syntax");
+        }
+    }
     #[test]
     fn t6_invalid_lead_eq() { assert_eq!(parse_arguments(&to_args(vec!["alias", "=val"])).0.pull().unwrap().action, AliasAction::Invalid); }
     #[test]
@@ -443,7 +450,37 @@ mod parse_and_action {
     #[test]
     fn t20_unknown_flag() { assert_eq!(parse_arguments(&to_args(vec!["alias", "--bogus"])).0.pull().unwrap().action, AliasAction::Invalid); }
     #[test]
-    fn t21_empty_val_delete() { if let AliasAction::Set(o) = parse_arguments(&to_args(vec!["alias", "g="])).0.pull().unwrap().action { assert_eq!(o.value, ""); } else { panic!(); } }
+    fn t21_empty_val_delete_single() {
+        let (mut queue, _) = parse_arguments(&to_args(vec!["alias", "g="]));
+        let task = queue.pull().unwrap();
+
+        // 1. Verify the path stuck (The trace proved this works now!)
+        assert!(!task.path.to_string_lossy().is_empty(), "Path should be injected");
+
+        // 2. MATCH ON REMOVE, NOT SET
+        if let AliasAction::Remove(name) = task.action {
+            assert_eq!(name, "g");
+        } else {
+            panic!("The harvester correctly returned Remove, but the test was looking for Set. Got: {:?}", task.action);
+        }
+    }
+    #[test]
+    fn t21_mixed_volatile_delete() {
+        // We want: g= (persistent) followed by --temp h= (volatile)
+        let args = to_args(vec!["alias", "g=", "--temp", "h="]);
+        let (queue, _) = parse_arguments(&args);
+
+        let tasks = queue.tasks;
+        assert_eq!(tasks.len(), 2);
+
+        // Task 0: g= (Should be Remove + Pathed)
+        assert!(matches!(tasks[0].action, AliasAction::Remove(_)));
+        assert!(!tasks[0].path.to_string_lossy().is_empty(), "g= should have a path");
+
+        // Task 1: h= (Should be Unalias + No Path)
+        assert!(matches!(tasks[1].action, AliasAction::Unalias(_)));
+        assert!(tasks[1].path.to_string_lossy().is_empty(), "h= with --temp should NOT have a path");
+    }
     #[test]
     fn t22_unalias_routing() { if let AliasAction::Unalias(n) = parse_arguments(&to_args(vec!["alias", "--unalias", "x"])).0.pull().unwrap().action { assert_eq!(n, "x"); } else { panic!(); } }
     #[test]
@@ -806,3 +843,174 @@ mod dispatch_and_integration {
         assert_eq!(q.pull().unwrap().action, AliasAction::Edit(Some("vim".into())));
     }
 }
+#[cfg(test)]
+mod parse_set_args {
+    use super::*;
+
+    // Mock verbosity for testing
+    fn mock_v() -> Verbosity { Verbosity::normal() }
+
+    #[test]
+    fn test_step1_flag_termination() {
+        // Scenario: alias --set g=git --reload
+        // The harvester should see the switch and STOP.
+        let args = vec!["g=git".to_string(), "--reload".to_string()];
+        let (action, consumed) = parse_set_argument(&mock_v(), &args, false, false, false);
+
+        if let AliasAction::Set(opts) = action {
+            assert_eq!(opts.name, "g");
+            assert_eq!(opts.value, "git");
+        } else { panic!("Expected Set action"); }
+        assert_eq!(consumed, 1); // Should NOT consume --reload
+    }
+
+    #[test]
+    fn test_step1_dash_dash_termination() {
+        // Scenario: alias --set g git -- commit -m "msg"
+        // Without gobble, it should stop at --
+        let args = vec!["g".to_string(), "git".to_string(), "--".to_string(), "commit".to_string()];
+        let (action, consumed) = parse_set_argument(&mock_v(), &args, false, false, false);
+
+        if let AliasAction::Set(opts) = action {
+            assert_eq!(opts.name, "g");
+            assert_eq!(opts.value, "git");
+        } else { panic!("Expected Set action"); }
+        assert_eq!(consumed, 2); // Consumed 'g' and 'git', stopped at '--'
+    }
+
+    #[test]
+    fn test_step1_eol_termination() {
+        // Scenario: alias --set my=cls
+        let args = vec!["my=cls".to_string()];
+        let (action, consumed) = parse_set_argument(&mock_v(), &args, false, false, false);
+
+        if let AliasAction::Set(opts) = action {
+            assert_eq!(opts.name, "my");
+            assert_eq!(opts.value, "cls");
+        } else { panic!("Expected Set action"); }
+        assert_eq!(consumed, 1);
+    }
+
+    #[test]
+    fn test_implicit_gobble() {
+        // Scenario: alias g git commit --force (Implicit Step 2)
+        // Gobble is TRUE here.
+        let args = vec!["g".to_string(), "git".to_string(), "commit".to_string(), "--force".to_string()];
+        let (action, consumed) = parse_set_argument(&mock_v(), &args, false, false, true);
+
+        if let AliasAction::Set(opts) = action {
+            assert_eq!(opts.name, "g");
+            assert_eq!(opts.value, "git commit --force");
+        } else { panic!("Expected Set action"); }
+        assert_eq!(consumed, 4); // Ate everything
+    }
+
+    #[test]
+    fn test_empty_strike_mutation() {
+        // Scenario: alias --set x= --temp
+        let args = vec!["x=".to_string(), "--temp".to_string()];
+        let (action, consumed) = parse_set_argument(&mock_v(), &args, true, false, false);
+
+        // Should return Unalias because volatile (temp) is true
+        assert!(matches!(action, AliasAction::Unalias(name) if name == "x"));
+        assert_eq!(consumed, 1);
+    }
+
+    #[test]
+    fn test_complex_chained_with_gobble() {
+        // Scenario: alias --set a=b -- --set c=d
+        // If we hit the --, the main loop calls this with is_gobble = true
+        let args = vec!["c=d".to_string()]; // The part after the --
+        let (action, consumed) = parse_set_argument(&mock_v(), &args, false, false, true);
+
+        if let AliasAction::Set(opts) = action {
+            assert_eq!(opts.name, "c");
+            assert_eq!(opts.value, "d");
+        }
+        assert_eq!(consumed, 1);
+    }
+    #[test]
+    fn test_illegal_name_windows_reserved() {
+        // Scenario: alias --set CON=format
+        // CON is a Windows reserved device name
+        let args = vec!["CON=format".to_string()];
+        let (action, consumed) = parse_set_argument(&mock_v(), &args, false, false, false);
+
+        assert!(matches!(action, AliasAction::Invalid));
+        assert_eq!(consumed, 1);
+    }
+
+    #[test]
+    fn test_illegal_name_leading_hyphen() {
+        // Scenario: alias --set -invalid=value
+        // Names cannot start with hyphens (they look like flags)
+        let args = vec!["-invalid=value".to_string()];
+        let (action, consumed) = parse_set_argument(&mock_v(), &args, false, false, false);
+
+        assert!(matches!(action, AliasAction::Invalid));
+        assert_eq!(consumed, 1);
+    }
+
+    #[test]
+    fn test_empty_set_call() {
+        // Scenario: User typed "--set" and nothing else
+        let args = vec![];
+        let (action, consumed) = parse_set_argument(&mock_v(), &args, false, false, false);
+
+        assert!(matches!(action, AliasAction::Invalid));
+        assert_eq!(consumed, 0);
+    }
+
+    #[test]
+    fn test_set_with_immediate_boundary() {
+        // Scenario: alias --set --reload
+        // The harvester should see that the "name" is actually a switch
+        // and return Invalid so the main loop can handle --reload.
+        let args = vec!["--reload".to_string()];
+        let (action, consumed) = parse_set_argument(&mock_v(), &args, false, false, false);
+
+        // This confirms the "Guardian Check" we discussed
+        assert!(matches!(action, AliasAction::Invalid));
+        assert_eq!(consumed, 1);
+    }
+
+    #[test]
+    fn test_set_with_immediate_delimiter() {
+        // Scenario: alias --set --
+        // Directly hitting the mode-switch before a name is found.
+        let args = vec!["--".to_string()];
+        let (action, consumed) = parse_set_argument(&mock_v(), &args, false, false, false);
+
+        assert!(matches!(action, AliasAction::Invalid));
+        assert_eq!(consumed, 1);
+    }
+
+    #[test]
+    fn test_malformed_equals_lead() {
+        // Scenario: alias =value (No name provided)
+        let args = vec!["=value".to_string()];
+        let (action, consumed) = parse_set_argument(&mock_v(), &args, false, false, false);
+
+        assert!(matches!(action, AliasAction::Invalid));
+        assert_eq!(consumed, 1);
+    }
+
+    #[test]
+    fn test_all_windows_reserved_names() {
+        for reserved in RESERVED_NAMES {
+            // Test both uppercase (standard) and lowercase (sneaky)
+            let variants = vec![reserved.to_string(), reserved.to_lowercase()];
+
+            for name_variant in variants {
+                let args = vec![format!("{} = some_command", name_variant)];
+                let (action, _) = parse_set_argument(&mock_v(), &args, false, false, false);
+
+                assert!(
+                    matches!(action, AliasAction::Invalid),
+                    "Failed to block reserved Windows name: {}", name_variant
+                );
+            }
+        }
+    }
+}
+

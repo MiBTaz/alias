@@ -13,14 +13,25 @@ use std::fs::File;
 use std::sync::{Arc, Mutex};
 use std::thread::sleep;
 use std::str::FromStr;
+use function_name::named;
 
 // --- Macros ---
 #[macro_export]
 macro_rules! trace {
-    ($($arg:tt)*) => {
+    // Branch 1: Single argument
+    ($arg:expr) => {
         #[cfg(any(debug_assertions, test))]
         {
-            eprintln!("[TRACE] {}", format!($($arg)*));
+            // Changing {} to {:?} is the key.
+            // It will now print "Query("cmd")" instead of just "cmd"
+            eprintln!("[TRACE][{}] {:?}", function_name!(), $arg);
+        }
+    };
+    // Branch 2: Format string
+    ($fmt:expr, $($arg:tt)*) => {
+        #[cfg(any(debug_assertions, test))]
+        {
+            eprintln!("[TRACE][{}] {}", function_name!(), format!($fmt, $($arg)*));
         }
     };
 }
@@ -167,6 +178,11 @@ pub const IO_RESPONSIVENESS_THRESHOLD: Duration = Duration::from_millis(500);
 const PATH_RESPONSIVENESS_THRESHOLD: Duration = Duration::from_millis(50);
 const DEFAULT_EXTS: &str = ".COM;.EXE;.BAT;.CMD;.VBS;.VBE;.JS;.JSE;.WSF;.WSH;.MSC";
 const DEFAULT_EXTS_EXE: &str = ".COM;.EXE;.SCR";
+pub const RESERVED_NAMES: &[&str] = &[
+"CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4",
+"COM5", "COM6", "COM7", "COM8", "COM9", "LPT1", "LPT2",
+"LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9"
+];
 pub const MAX_ALIAS_FILE_SIZE: usize = 1_500_000;
 pub const MAX_BINARY_FILE_SIZE: usize = 100_000_000;
 
@@ -654,9 +670,9 @@ impl AliasAction {
             | AliasAction::Edit(_)
             | AliasAction::File
             | AliasAction::Reload
+            | AliasAction::Remove(_)
             | AliasAction::Set(_)
             | AliasAction::ShowAll
-            | AliasAction::Unalias(_)
             => true,
             // Everything else (Help, Setup, Which, etc.) doesn't touch the d
             _ => false,
@@ -664,6 +680,16 @@ impl AliasAction {
     }
     pub fn intent(arg: &str) -> Self {
         arg.parse().unwrap_or(AliasAction::Invalid)
+    }
+    pub fn is_switch(arg: &str) -> bool {
+        if !arg.starts_with("--") {return false;}
+        // Reuse the existing FromStr logic
+        match Self::from_str(arg) {
+            Ok(action) => !matches!(action, AliasAction::Query(_)),
+            // If it's Invalid, it's a malformed flag (e.g., --unknown),
+            // so we still treat it as a boundary switch.
+            Err(_) => true,
+        }
     }
 }
 impl FromStr for AliasAction {
@@ -1067,6 +1093,7 @@ pub fn run<P: AliasProvider>(mut args: Vec<String>) -> Result<(), Box<dyn std::e
 // Logic Block 1: Flag Harvesting.
 // Logic Block 2: Sticky Path / Context Resolution (Hydrating the Task.path).
 // Logic Block 3: Greedy Payload Collection.
+#[named]
 pub fn parse_arguments(args: &[String]) -> (TaskQueue, Verbosity) {
     let mut queue = TaskQueue::new();
     let mut voice = Verbosity::loud();
@@ -1076,7 +1103,7 @@ pub fn parse_arguments(args: &[String]) -> (TaskQueue, Verbosity) {
     let mut pivot_index = args.len();
     let mut skip_next = false;
     let mut saw_unknown = false;
-
+    let mut is_literal = false;
     // --- STEP 1: FLAG HARVESTING ---
     for (i, arg) in args.iter().enumerate().skip(1) {
         if skip_next {
@@ -1085,6 +1112,7 @@ pub fn parse_arguments(args: &[String]) -> (TaskQueue, Verbosity) {
         }
         if arg == "--" {
             if voice.in_setup { setup_failure!(voice, queue, arg); }
+            is_literal = true;
             pivot_index = i + 1; // Everything after this is payload
             break;               // Stop looking for flags immediately
         }
@@ -1221,53 +1249,28 @@ pub fn parse_arguments(args: &[String]) -> (TaskQueue, Verbosity) {
     }
 
     // --- STEP 2: PAYLOAD HARVESTING ---
-    let f_args = &args[pivot_index..];
-    let mut i = 0;
-    while i < f_args.len() {
-        let arg = &f_args[i];
+    let mut i = pivot_index;
+    while i < args.len() { // Change 'if' to 'while'
 
-        if let Some((n, v)) = arg.split_once('=') {
-            // CASE 1: Standard 'name=value'
-            let name = n.trim();
-            if is_valid_name(name) {
-                queue.push(AliasAction::Set(SetOptions {
-                    name: name.to_string(),
-                    value: v.trim_start().to_string(),
-                    volatile,
-                    force_case,
-                }));
-            } else { queue.push(AliasAction::Invalid); }
-            break; // Standard set, we're done
+        // Use is_literal to decide if we should 'gobble' everything
+        let (action, consumed) = parse_set_argument(&voice, &args[i..], volatile, force_case, is_literal);
+
+        queue.push(action);
+
+        // Ensure we actually move forward
+        let move_by = if consumed == 0 { 1 } else { consumed };
+        i += move_by;
+
+        // CRITICAL: If we hit a flag like --temp, we need to update 'volatile'
+        // for the NEXT task in the loop!
+        if i < args.len() {
+            let next_arg = args[i].to_lowercase();
+            if next_arg == "--temp" {
+                volatile = true;
+                i += 1; // Skip the flag so the next harvest gets the name
+            }
+            // Add other "mid-stream" flags here if needed (--force, etc.)
         }
-        else if i + 1 < f_args.len() && f_args[i+1] == "=" {
-            // CASE 2: The Bridge "x = y"
-            // If the NEXT arg is exactly "=", we skip it and gobble the rest
-            if is_valid_name(arg) {
-                queue.push(AliasAction::Set(SetOptions {
-                    name: arg.to_string(),
-                    value: f_args[i+2..].join(" "),
-                    volatile,
-                    force_case,
-                }));
-            } else { queue.push(AliasAction::Invalid); }
-            break;
-        }
-        else if i + 1 < f_args.len() && is_valid_name(arg) {
-            // CASE 3: The Gobbler "x y"
-            // Implied equals. We take the rest of the line as the value.
-            queue.push(AliasAction::Set(SetOptions {
-                name: arg.to_string(),
-                value: f_args[i+1..].join(" "),
-                volatile,
-                force_case,
-            }));
-            break;
-        }
-        else {
-            // CASE 4: Single word 'name' (Query)
-            queue.push(AliasAction::Query(arg.clone()));
-        }
-        i += 1;
     }
     // --- STEP 3: THE RESOLUTION (The Sticky Sweep) ---
     trace!("Pre test: Custom path: {:?}", custom_path);
@@ -1287,11 +1290,11 @@ pub fn parse_arguments(args: &[String]) -> (TaskQueue, Verbosity) {
     trace!("  Custom Path: {:?}", custom_path);
     trace!("  Current Context: {:?}", current_context);
     trace!("  Resolved Context: {:?}", current_context);
-    let mut i= 0;
+    let mut i= queue.tasks.len();
 
     for task in queue.tasks.iter_mut().rev() {
-        trace!("  Processing Task [{}]: {:?}", i, task.action);
-        i += 1;
+        trace!("  Processing Task [{}]: {:?}", i - 1, task.action);
+        i -= 1;
         if task.action == AliasAction::File { break; }
 
         // ONLY act if it's empty AND it actually needs a file
@@ -1317,7 +1320,84 @@ pub fn parse_arguments(args: &[String]) -> (TaskQueue, Verbosity) {
     }
     (queue, voice)
 }
+#[named]
+pub fn parse_set_argument(
+    _verbosity: &Verbosity, // Prefixed to clear warning
+    f_args: &[String],
+    volatile: bool,
+    force_case: bool,
+    is_gobble: bool,
+) -> (AliasAction, usize) {
+    if f_args.is_empty() { return (AliasAction::Invalid, 0); }
 
+    let mut i = 0;
+    let mut cmd_parts: Vec<String> = Vec::new();
+    let mut saw_equals = false;
+
+    // --- 1. NAME & INITIAL VALUE EXTRACTION ---
+    // Using a more idiomatic 'let' to avoid the "unused assignment" warning
+    let name = if let Some((n, v)) = f_args[i].split_once('=') {
+        saw_equals = true;
+        let first_val = v;
+        if !first_val.is_empty() {
+            cmd_parts.push(first_val.to_string());
+        }
+        i += 1;
+        n.trim().to_string()
+    } else {
+        let n = f_args[i].clone();
+        i += 1;
+        // Check for the "Bridge" (=)
+        if i < f_args.len() && f_args[i] == "=" {
+            saw_equals = true;
+            i += 1;
+        }
+        n
+    };
+
+    // --- 2. VALUE HARVESTING ---
+    while i < f_args.len() {
+        trace!("f_args[{}]={}", i, f_args[i]);
+        let current = &f_args[i];
+        trace!("gobble:{} AliasAction::is_switch(current):{} current:{} f_args[i]={}", is_gobble, AliasAction::is_switch(current), current, &f_args[i]);
+        if !is_gobble && (AliasAction::is_switch(current) || current == "--") {
+            break;
+        }
+        cmd_parts.push(current.clone());
+        trace!("while. after push. len is {}", cmd_parts.len());
+        i += 1;
+    }
+    trace!("Done...");
+    // --- 3. THE LOGIC GATE ---
+    if !is_gobble && !is_valid_name(&name) {
+        trace!("AliasAction::Invalid");
+        return (AliasAction::Invalid, i);
+    }
+
+    trace!("saw={}, cmd_parts.len={}", saw_equals, cmd_parts.len());
+    // CASE A: The "Empty Strike" (name= or name =)
+    if saw_equals && cmd_parts.is_empty() {
+        trace!("AliasAction::Unalias");
+        return if volatile { (AliasAction::Unalias(name), i) }
+        else { (AliasAction::Remove(name), i) };
+    }
+
+    // CASE B: The Query (No equals sign and no values found)
+    if !saw_equals && cmd_parts.is_empty() {
+        trace!("AliasAction::Query");
+        return (AliasAction::Query(name), i);
+    }
+
+    // CASE C: The Standard Set
+    let settings = SetOptions {
+        name,
+        value: cmd_parts.join(" "),
+        volatile,
+        force_case,
+    };
+    trace!("AliasAction::Set");
+    (AliasAction::Set(settings), i)
+}
 // --- Dipatcher, does what you think
 // Matches on AliasAction and executes the specific command strategy.
 pub fn dispatch<P: AliasProvider>(task: Task, verbosity: &Verbosity, ) -> Result<(), Box<dyn std::error::Error>> {
@@ -1356,7 +1436,7 @@ pub fn dispatch<P: AliasProvider>(task: Task, verbosity: &Verbosity, ) -> Result
                     force_case: false,
                 };
                 P::set_alias(opts, path, verbosity)?;
-                say!(verbosity, AliasIcon::File, "Removed alias '{}' from {}", name, path.display());
+                say!(verbosity, AliasIcon::File, "Removed alias '{}' ", name);
             } else {
                 return Err(failure!(verbosity, ErrorCode::MissingName, "Error: name required"));
             }
@@ -1787,7 +1867,7 @@ fn functional_cmp(a: &str, b: &str) -> bool {
 pub fn is_valid_name(name: &str) -> bool {
     // 1. Basic whitespace and emptiness checks
     if name.is_empty() || name.contains(' ') || name.trim() != name { return false; }
-
+    if RESERVED_NAMES.contains(&name.to_uppercase().as_str()) { return false; }
     // 2. THE BLACKLIST: Reject notorious shell animals
     // Includes quotes, colons (drive letters), carets (cmd escape), and redirections
     let notorious_animals = ['"', '\'', ':', '^', '&', '|', '<', '>', '(', ')'];
@@ -1956,7 +2036,7 @@ pub fn normalize_path(path: PathBuf) -> String {
     // Otherwise just strip the standard extended prefix
     s.strip_prefix(UNC_PATH).unwrap_or(&s).to_string()
 }
-
+#[named]
 pub fn update_disk_file(verbosity: &Verbosity, name: &str, value: &str, path: &Path) -> Result<(), Box<dyn std::error::Error>> {
     // 1. Load existing data
     let mut pairs = {
@@ -2215,6 +2295,7 @@ pub fn peek_pe_metadata(path: &Path) -> io::Result<(BinarySubsystem, bool)> {
     Ok((subsystem, is_32bit))
 }
 
+#[named]
 pub fn is_drive_responsive(path: &Path, timeout: Duration) -> bool {
     let path_buf = path.to_path_buf();
     trace!("[DRIVE_CHECK] Starting guard for: {:?}", path_buf);
@@ -2251,7 +2332,7 @@ fn is_path_viable(path: &Path) -> bool {
     // Now we know the drive is awake and the file isn't hard-locked.
     is_path_healthy(path, MAX_ALIAS_FILE_SIZE)
 }
-
+#[named]
 pub fn can_path_exist(path: &Path) -> bool {
     let dir_to_check = match path.parent().filter(|p| !p.as_os_str().is_empty()) {
         Some(p) => p.to_path_buf(),
@@ -2264,7 +2345,7 @@ pub fn can_path_exist(path: &Path) -> bool {
         std::fs::metadata(&dir_to_check).ok().map(|_| ())
     }).and_then(|inner| inner).is_some() // Use and_then to reach the real answer
 }
-
+#[named]
 pub fn resolve_viable_path(path: &PathBuf) -> Option<PathBuf> {
     if is_viable_path(path) {
         let clean_str = path.canonicalize()
@@ -2277,7 +2358,7 @@ pub fn resolve_viable_path(path: &PathBuf) -> Option<PathBuf> {
         None
     }
 }
-
+#[named]
 fn is_viable_path(path: &Path) -> bool {
     // 1. Force Canonicalization
     // This turns short-names into long-names and validates the route

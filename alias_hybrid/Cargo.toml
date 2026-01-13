@@ -25,6 +25,7 @@ serial_test = "3.1.1"
 winreg = "0.52" # Or your current version
 alias_nuke = { path = "../alias_nuke" }
 ctor = "0.6.3"
+function_name = "0.3.0"
 
 
 [features]
