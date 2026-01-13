@@ -221,6 +221,28 @@ impl AliasProvider for Win32LibraryInterface {
         Ok(report)
     }
 
+    fn purge_file_macros(verbosity: &Verbosity, path: &Path) -> io::Result<PurgeReport> {
+        let mut report = PurgeReport::default();
+
+        // 1. Read the file into memory
+        let content = std::fs::read_to_string(path)
+            .map_err(|e| io::Error::new(io::ErrorKind::NotFound, format!("Could not read alias file: {}", e)))?;
+
+        // 2. Iterate through every data line in the file
+        for line in content.lines() {
+            if let Some((name, _)) = is_data_line(line) {
+                // 3. Unset the alias from the Win32/OS RAM
+                // Passing None to raw_set_macro is the trigger to delete
+                if Self::raw_set_macro(name, None)? {
+                    report.cleared.push(name.to_string());
+                } else {
+                    report.failed.push((name.to_string(), 0));
+                }
+            }
+        }
+        Ok(report)
+    }
+
     fn reload_full(path: &Path, verbosity: &Verbosity) -> Result<(), Box<dyn std::error::Error>> {
         // 1. Add '?' to percolate the error and get the Vec
         // 2. Pass verbosity to match the new signature

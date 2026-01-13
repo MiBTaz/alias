@@ -1,5 +1,15 @@
 // alias_lib/tests/library_tests.rs
+
 // 1. Pull in the public API of the library
+#[cfg(test)]
+#[ctor::ctor]
+fn init() {
+    unsafe {
+        std::env::remove_var("ALIAS_FILE");
+        std::env::remove_var("ALIAS_OPTS");
+        std::env::remove_var("ALIAS_PATH");
+    }
+}
 
 /// ---------------------------------------------------------
 /// LOCAL TESTS (Specific to this crate)

@@ -5,6 +5,17 @@
 use alias_lib::*;
 #[allow(unused_imports)]
 use serial_test::serial;
+
+#[cfg(test)]
+#[ctor::ctor]
+fn init() {
+    unsafe {
+        std::env::remove_var("ALIAS_FILE");
+        std::env::remove_var("ALIAS_OPTS");
+        std::env::remove_var("ALIAS_PATH");
+    }
+}
+
 /// ---------------------------------------------------------
 /// 1. LOCAL TESTS (Specific to this crate)
 /// ---------------------------------------------------------

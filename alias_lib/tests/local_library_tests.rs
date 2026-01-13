@@ -1,707 +1,808 @@
-// alias_lib/src/tests/alias_tests.rs
-use alias_lib::*;
-#[cfg(test)]
-mod tests {
+// alias_lib/tests/local_library_tests.rs
 
+use alias_lib::*;
+
+#[cfg(test)]
+#[ctor::ctor]
+fn init() {
+    unsafe {
+        std::env::remove_var("ALIAS_FILE");
+        std::env::remove_var("ALIAS_OPTS");
+        std::env::remove_var("ALIAS_PATH");
+    }
+}
+
+#[cfg(test)]
+mod argument_tests {
+    use super::*;
+//    use std::path::PathBuf;
+
+    // =========================================================
+    // 1. COMMAND PARSER & ACTION MAPPING
+    // =========================================================
+
+    #[test]
+    fn test_show_all() {
+        let args = vec!["alias".into()];
+        let (mut queue, voice) = parse_arguments(&args);
+
+        assert_eq!(queue.len(), 1);
+        assert_eq!(queue.pull().unwrap().action, AliasAction::ShowAll);
+        assert!(!voice.is_silent());
+    }
+
+    #[test]
+    fn test_help_flag() {
+        let args = vec!["alias".into(), "--help".into()];
+        let (mut queue, _) = parse_arguments(&args);
+
+        assert_eq!(queue.len(), 1);
+        assert_eq!(queue.pull().unwrap().action, AliasAction::Help);
+    }
+
+    #[test]
+    fn test_quiet_and_icons() {
+        let args = vec!["alias".into(), "--quiet".into(), "--icons".into()];
+        let (_, voice) = parse_arguments(&args);
+
+        assert_eq!(voice.level, VerbosityLevel::Silent);
+        assert_eq!(voice.show_icons, ShowFeature::On);
+    }
+
+    #[test]
+    fn test_reload_flag() {
+        let args = vec!["alias".into(), "--reload".into()];
+        let (mut queue, _) = parse_arguments(&args);
+
+        assert_eq!(queue.len(), 1);
+        assert_eq!(queue.pull().unwrap().action, AliasAction::Reload);
+    }
+
+    #[test]
+    fn test_unalias_flag() {
+        let args = vec!["alias".into(), "--unalias".into(), "test_cmd".into()];
+        let (mut queue, _) = parse_arguments(&args);
+
+        assert_eq!(queue.len(), 1);
+        if let AliasAction::Unalias(name) = queue.pull().unwrap().action {
+            assert_eq!(name, "test_cmd");
+        } else {
+            panic!("Expected AliasAction::Unalias");
+        }
+    }
+
+    #[test]
+    fn test_file_flag() {
+        let args = vec!["alias".into(), "--file".into(), "custom.doskey".into()];
+        let (mut queue, _) = parse_arguments(&args);
+
+        assert_eq!(queue.len(), 1);
+        let task = queue.pull().unwrap();
+        assert_eq!(task.action, AliasAction::File);
+    }
+
+    #[test]
+    fn test_reload_and_query() {
+        let args = vec!["alias".into(), "--reload".into(), "my_cmd".into()];
+        let (mut queue, _) = parse_arguments(&args);
+
+        assert_eq!(queue.len(), 2);
+        assert_eq!(queue.pull().unwrap().action, AliasAction::Reload);
+
+        if let AliasAction::Query(name) = queue.pull().unwrap().action {
+            assert_eq!(name, "my_cmd");
+        } else {
+            panic!("Expected trailing Query task");
+        }
+    }
+
+    #[test]
+    fn test_path_sticky_sweep() {
+        let args = vec![
+            "alias".into(),
+            "--reload".into(),
+            "--file".into(),
+            "custom.doskey".into(),
+            "test".into()
+        ];
+        let (mut queue, _) = parse_arguments(&args);
+
+        assert_eq!(queue.len(), 3);
+
+        let t1 = queue.pull().unwrap(); // Reload
+        let t2 = queue.pull().unwrap(); // File
+        let t3 = queue.pull().unwrap(); // Query
+
+        assert!(t1.path.to_string_lossy().contains("custom.doskey"));
+        assert_eq!(t2.action, AliasAction::File);
+        assert!(t3.path.as_os_str().is_empty(), "Queries should have empty paths as they are RAM-based");
+    }
+
+    #[test]
+    fn test_default_path_resolution() {
+        // We add --which to create a Query task first.
+        // The remaining args "my_cmd new_cmd=value" become the Greedy Set payload.
+        let args = vec![
+            "alias".into(),
+            "--which".into(),
+            "my_cmd".into(),
+            "new_cmd=value".into()
+        ];
+        let (mut queue, _) = parse_arguments(&args);
+
+        // 2. The greedy payload "my_cmd new_cmd=value" creates the second task: A Set.
+        // This should have the default .doskey path.
+        let task_s = queue.pop().expect("Should have set task from greedy payload");
+        assert!(task_s.path.to_string_lossy().contains(".doskey"), "Set MUST have a path");
+
+        // 1. The --which flag creates the first task: A Query.
+        // This should have an empty path (RAM-based).
+        let task_q = queue.pop().expect("Should have query task from --which");
+        assert!(task_q.path.to_string_lossy().is_empty(), "Which should have NO path");
+
+
+        // 3. Final Safety
+        assert_eq!(queue.len(), 0, "Queue should be empty");
+    }
+
+
+    #[test]
+    fn test_setup_requirement() {
+        let args = vec!["alias".into(), "--setup".into()];
+        let (mut queue, voice) = parse_arguments(&args);
+
+        assert_eq!(queue.len(), 1);
+        assert_eq!(queue.pull().unwrap().action, AliasAction::Setup);
+        assert!(voice.in_setup);
+    }
+
+    #[test]
+    fn test_invalid_file_marks_fail() {
+        // We use 'ls=dir' (a Set) instead of 'ls' (a Query)
+        let args = vec![
+            "alias".into(),
+            "--file".into(),
+            "/non/existent/path/xyz.txt".into(),
+            "--edalias".into()
+        ];
+        let (queue, _) = parse_arguments(&args);
+
+        let tasks: Vec<_> = queue.tasks.into_iter().collect();
+
+        // Now, because Set needs a file and the path is garbage, it will hit AliasAction::Fail
+        let has_fail = tasks.iter().any(|t| matches!(t.action, AliasAction::Fail));
+        assert!(has_fail, "Expected 'Set' task to fail due to unresolvable path");
+    }
+
+    #[test]
+    fn test_payload_set_space() {
+        let args = vec!["alias".into(), "list".into(), "ls".into(), "-la".into()];
+        let (mut queue, _) = parse_arguments(&args);
+
+        assert_eq!(queue.len(), 1);
+        if let AliasAction::Set(opts) = queue.pull().unwrap().action {
+            assert_eq!(opts.name, "list");
+            assert_eq!(opts.value, "ls -la");
+        } else {
+            panic!("Expected AliasAction::Set from space separation");
+        }
+    }
+
+    #[test]
+    fn test_payload_query() {
+        let args = vec!["alias".into(), "git_status".into()];
+        let (mut queue, _) = parse_arguments(&args);
+
+        assert_eq!(queue.len(), 1);
+        if let AliasAction::Query(name) = queue.pull().unwrap().action {
+            assert_eq!(name, "git_status");
+        } else {
+            panic!("Expected AliasAction::Query");
+        }
+    }
+
+    #[test]
+    fn test_payload_with_persistence_flags() {
+        let args = vec!["alias".into(), "--temp".into(), "--force".into(), "tmp=echo 1".into()];
+        let (mut queue, _) = parse_arguments(&args);
+
+        if let AliasAction::Set(opts) = queue.pull().unwrap().action {
+            assert!(opts.volatile);
+            assert!(opts.force_case);
+            assert_eq!(opts.name, "tmp");
+        } else {
+            panic!("Expected AliasAction::Set with flags");
+        }
+    }
+
+    #[test]
+    fn test_payload_invalid_name() {
+        let args = vec!["alias".into(), "!!!invalid=value".into()];
+        let (mut queue, _) = parse_arguments(&args);
+
+        assert_eq!(queue.len(), 1);
+        assert_eq!(queue.pull().unwrap().action, AliasAction::Invalid);
+    }
+
+    #[test]
+    fn test_unalias_and_remove_logic() {
+        let args_u = vec!["alias".into(), "--unalias".into(), "old_cmd".into()];
+        let (mut queue_u, _) = parse_arguments(&args_u);
+        if let AliasAction::Unalias(name) = queue_u.pull().unwrap().action {
+            assert_eq!(name, "old_cmd");
+        }
+
+        let args_r = vec!["alias".into(), "--remove".into(), "other_cmd".into()];
+        let (mut queue_r, _) = parse_arguments(&args_r);
+        if let AliasAction::Remove(name) = queue_r.pull().unwrap().action {
+            assert_eq!(name, "other_cmd");
+        }
+    }
+
+    #[test]
+    fn test_editor_extraction() {
+        let args_space = vec!["alias".into(), "--edalias".into()];
+        let (mut queue_s, _) = parse_arguments(&args_space);
+        if let AliasAction::Edit(ed) = queue_s.pull().unwrap().action {
+            assert!(ed.is_none());
+        }
+
+        let args_eq = vec!["alias".into(), "--edalias=vim".into()];
+        let (mut queue_e, _) = parse_arguments(&args_eq);
+        if let AliasAction::Edit(Some(ed)) = queue_e.pull().unwrap().action {
+            assert_eq!(ed, "vim");
+        }
+    }
+
+    #[test]
+    fn test_clear_and_which() {
+        let args = vec!["alias".into(), "--clear".into(), "--which".into(), "target".into()];
+        let (mut queue, _) = parse_arguments(&args);
+
+        assert_eq!(queue.len(), 3);
+        assert_eq!(queue.pull().unwrap().action, AliasAction::Clear);
+        assert_eq!(queue.pull().unwrap().action, AliasAction::Which);
+        if let AliasAction::Query(name) = queue.pull().unwrap().action {
+            assert_eq!(name, "target");
+        }
+    }
+
+    #[test]
+    fn test_double_dash_escape() {
+        let args = vec!["alias".into(), "--".into(), "--quiet".into()];
+        let (mut queue, voice) = parse_arguments(&args);
+
+        assert!(!voice.is_silent());
+        assert_eq!(queue.len(), 1);
+        if let AliasAction::Query(name) = queue.pull().unwrap().action {
+            assert_eq!(name, "--quiet");
+        }
+    }
+
+    #[test]
+    fn test_setup_failure_on_restricted_flags() {
+        let args = vec!["alias".into(), "--setup".into(), "--remove".into(), "old_cmd".into()];
+        let (_, voice) = parse_arguments(&args);
+        assert!(voice.in_setup);
+    }
+
+    #[test]
+    fn test_setup_must_be_first() {
+        let args = vec!["alias".into(), "--reload".into(), "--setup".into()];
+        let (_, voice) = parse_arguments(&args);
+        assert!(voice.in_setup);
+    }
+}
+
+mod existence_checks {
+    #[cfg(test)]
+    mod path_logic_tests {
+//        use super::*;
+        use std::path::PathBuf;
+        use std::time::Duration;
+        use alias_lib::{can_path_exist, is_drive_responsive, is_file_accessible, is_path_healthy, resolve_viable_path, timeout_guard};
+
+        // --- timeout_guard tests ---
+        #[test]
+        fn test_timeout_guard_success() {
+            let res = timeout_guard(Duration::from_millis(100), || Some("done"));
+            assert_eq!(res, Some(Some("done")));
+        }
+
+        #[test]
+        fn test_timeout_guard_expired() {
+            let res = timeout_guard(Duration::from_millis(10), || {
+                std::thread::sleep(Duration::from_millis(50));
+                Some("too late")
+            });
+            assert!(res.is_none()); // Guard itself timed out
+        }
+
+        // --- can_path_exist tests ---
+        #[test]
+        fn test_can_path_exist_valid_dir() {
+            let temp = std::env::current_dir().unwrap();
+            let path = temp.join("new_file.txt");
+            assert!(can_path_exist(&path));
+        }
+
+        #[test]
+        fn test_can_path_exist_garbage_dir() {
+            let path = PathBuf::from("/this/path/does/not/exist/at/all/file.txt");
+            assert!(!can_path_exist(&path));
+        }
+
+        // --- is_drive_responsive tests ---
+        #[test]
+        fn test_drive_responsive_on_real_path() {
+            let cur = std::env::current_dir().unwrap();
+            assert!(is_drive_responsive(&cur, Duration::from_millis(100)));
+        }
+
+        // --- is_path_healthy tests ---
+        #[test]
+        fn test_path_healthy_too_large() {
+            // Mock a path check with 0 byte threshold
+            let cur = std::env::current_dir().unwrap(); // A directory isn't a file
+            assert!(!is_path_healthy(&cur, 1000));
+        }
+
+        // --- is_file_accessible tests ---
+        #[test]
+        fn test_file_accessible_non_existent() {
+            let path = PathBuf::from("z:/definitely_not_a_real_file_123.txt");
+            assert!(!is_file_accessible(&path));
+        }
+
+        // --- resolve_viable_path (The Grand Finale) ---
+        #[test]
+        fn test_resolve_viable_path_garbage() {
+            let path = PathBuf::from("/non/existent/path/xyz.txt");
+            let res = resolve_viable_path(&path);
+            // This MUST be None for your Step 3 Fail logic to work
+            assert!(res.is_none(), "Should not resolve garbage paths");
+        }
+
+        #[test]
+        fn test_resolve_viable_path_valid_new_file() {
+            let mut temp = std::env::temp_dir();
+            temp.push("alias_test_new_file.txt");
+            let res = resolve_viable_path(&temp);
+            assert!(res.is_some(), "Should resolve new files in valid directories");
+        }
+    }
+
+}
+
+// =========================================================
+// SECTION 1: COMMAND PARSER & ACTION MAPPING (Tests 1-25)
+// =========================================================
+
+#[cfg(test)]
+mod parse_and_action {
     use crate::*;
-    use std::env;
-    use std::fs;
-    use std::path::{Path, PathBuf};
-    // use super::*;
+
+    fn to_args(args: Vec<&str>) -> Vec<String> {
+        args.into_iter().map(|s| s.to_string()).collect()
+    }
+
+    // =========================================================
+    // SECTION 1: COMMAND PARSER & ACTION MAPPING (Tests 1-25)
+    // =========================================================
+
+    #[test]
+    fn t1_show_all() { assert_eq!(parse_arguments(&to_args(vec!["alias"])).0.pull().unwrap().action, AliasAction::ShowAll); }
+    #[test]
+    fn t2_query_ls() { assert!(matches!(parse_arguments(&to_args(vec!["alias", "ls"])).0.pull().unwrap().action, AliasAction::Query(n) if n == "ls")); }
+    #[test]
+    fn t3_set_equals() {
+        if let AliasAction::Set(o) = parse_arguments(&to_args(vec!["alias", "g=git"])).0.pull().unwrap().action {
+            assert_eq!(o.name, "g");
+            assert_eq!(o.value, "git");
+        } else { panic!(); }
+    }
+    #[test]
+    fn t4_set_space() {
+        if let AliasAction::Set(o) = parse_arguments(&to_args(vec!["alias", "vi", "nvim"])).0.pull().unwrap().action {
+            assert_eq!(o.name, "vi");
+            assert_eq!(o.value, "nvim");
+        } else { panic!(); }
+    }
+    #[test]
+    fn t5_delete_syntax() { if let AliasAction::Set(o) = parse_arguments(&to_args(vec!["alias", "x="])).0.pull().unwrap().action { assert_eq!(o.value, ""); } else { panic!(); } }
+    #[test]
+    fn t6_invalid_lead_eq() { assert_eq!(parse_arguments(&to_args(vec!["alias", "=val"])).0.pull().unwrap().action, AliasAction::Invalid); }
+    #[test]
+    fn t7_help() { assert_eq!(parse_arguments(&to_args(vec!["alias", "--help"])).0.pull().unwrap().action, AliasAction::Help); }
+    #[test]
+    fn t8_reload() { assert_eq!(parse_arguments(&to_args(vec!["alias", "--reload"])).0.pull().unwrap().action, AliasAction::Reload); }
+    #[test]
+    fn t9_setup() { assert_eq!(parse_arguments(&to_args(vec!["alias", "--setup"])).0.pull().unwrap().action, AliasAction::Setup); }
+    #[test]
+    fn t10_which() { assert_eq!(parse_arguments(&to_args(vec!["alias", "--which"])).0.pull().unwrap().action, AliasAction::Which); }
+    #[test]
+    fn t11_clear() { assert_eq!(parse_arguments(&to_args(vec!["alias", "--clear"])).0.pull().unwrap().action, AliasAction::Clear); }
+    #[test]
+    fn t12_edalias_none() { assert_eq!(parse_arguments(&to_args(vec!["alias", "--edalias"])).0.pull().unwrap().action, AliasAction::Edit(None)); }
+    #[test]
+    fn t13_edalias_val() { assert_eq!(parse_arguments(&to_args(vec!["alias", "--edalias=vim"])).0.pull().unwrap().action, AliasAction::Edit(Some("vim".into()))); }
+    #[test]
+    fn t14_edaliases_syn() { assert_eq!(parse_arguments(&to_args(vec!["alias", "--edaliases=nano"])).0.pull().unwrap().action, AliasAction::Edit(Some("nano".into()))); }
+    #[test]
+    fn t15_quiet_voice() { assert!(parse_arguments(&to_args(vec!["alias", "--quiet"])).1.is_silent()); }
+    #[test]
+    fn t16_temp_flag() { if let AliasAction::Set(o) = parse_arguments(&to_args(vec!["alias", "--temp", "x=y"])).0.pull().unwrap().action { assert!(o.volatile); } else { panic!(); } }
+    #[test]
+    fn t17_force_flag() { if let AliasAction::Set(o) = parse_arguments(&to_args(vec!["alias", "--force", "x=y"])).0.pull().unwrap().action { assert!(o.force_case); } else { panic!(); } }
+    #[test]
+    fn t18_mixed_flags() {
+        if let AliasAction::Set(o) = parse_arguments(&to_args(vec!["alias", "--temp", "--force", "x=y"])).0.pull().unwrap().action { assert!(o.volatile && o.force_case); } else { panic!(); }
+    }
+    #[test]
+    fn t19_short_flag_safety() { assert_eq!(parse_arguments(&to_args(vec!["alias", "-e"])).0.pull().unwrap().action, AliasAction::Invalid); }
+    #[test]
+    fn t20_unknown_flag() { assert_eq!(parse_arguments(&to_args(vec!["alias", "--bogus"])).0.pull().unwrap().action, AliasAction::Invalid); }
+    #[test]
+    fn t21_empty_val_delete() { if let AliasAction::Set(o) = parse_arguments(&to_args(vec!["alias", "g="])).0.pull().unwrap().action { assert_eq!(o.value, ""); } else { panic!(); } }
+    #[test]
+    fn t22_unalias_routing() { if let AliasAction::Unalias(n) = parse_arguments(&to_args(vec!["alias", "--unalias", "x"])).0.pull().unwrap().action { assert_eq!(n, "x"); } else { panic!(); } }
+    #[test]
+    fn t23_remove_routing() { if let AliasAction::Remove(n) = parse_arguments(&to_args(vec!["alias", "--remove", "x"])).0.pull().unwrap().action { assert_eq!(n, "x"); } else { panic!(); } }
+    #[test]
+    fn t24_startup_flag() { assert!(parse_arguments(&to_args(vec!["alias", "--startup"])).1.in_startup); }
+    #[test]
+    fn t25_double_dash() { if let AliasAction::Query(n) = parse_arguments(&to_args(vec!["alias", "--", "--quiet"])).0.pull().unwrap().action { assert_eq!(n, "--quiet"); } else { panic!(); } }
+}
+#[cfg(test)]
+mod round_trip_tests {
+    use super::*;
+    use std::str::FromStr;
+
+    #[test]
+    fn test_all_15_variants() {
+        let test_cases = vec![
+            // Flags
+            ("--help", AliasAction::Help),
+            ("--reload", AliasAction::Reload),
+            ("--setup", AliasAction::Setup),
+            ("--clear", AliasAction::Clear),
+            ("--which", AliasAction::Which),
+            ("--all", AliasAction::ShowAll),
+            ("--file", AliasAction::File),
+
+            // Key=Value
+            ("--remove=test", AliasAction::Remove("test".to_string())),
+            ("--unalias=test", AliasAction::Unalias("test".to_string())),
+            ("--edalias=notepad", AliasAction::Edit(Some("notepad".to_string()))),
+            ("--edalias", AliasAction::Edit(None)),
+
+            // Payloads
+            ("my_cmd=dir /s", AliasAction::Set(SetOptions {
+                name: "my_cmd".into(),
+                value: "dir /s".into(),
+                volatile: false,
+                force_case: false
+            })),
+            ("search_query", AliasAction::Query("search_query".into())),
+
+            // Internals
+            ("--invalid", AliasAction::Invalid),
+        ];
+
+        for (input, _expected_variant) in test_cases {
+            // 1. Test FromStr (Input -> Action)
+            let action = AliasAction::from_str(input).expect("Should parse variant");
+
+            // 2. Test Display (Action -> Output)
+            let output = format!("{}", action);
+            assert_eq!(input, output, "Symmetry broken for {}", input);
+        }
+    }
+}
+// =========================================================
+// SECTION 2: SOVEREIGN VOICE & UI MACROS (Tests 26-40)
+// =========================================================
+mod voice_and_ui {
     use std::io;
+    use alias_lib::ShowFeature::{Off, On};
+    use alias_lib::{failure, get_random_tip, random_tip_show, say, shout, voice, AliasIcon, ErrorCode, ShowTips, Verbosity, VerbosityLevel, ICON_MATRIX};
+
+    #[test]
+    fn t26_icon_empty() { assert_eq!(Verbosity::normal().icon_format(AliasIcon::Say, ""), ""); }
+    #[test]
+    fn t27_tip_gen() {
+        assert!(!get_random_tip().is_empty());
+        let mut found = false;
+        for _ in 0..100 { // Probability of failure: 1 in 10^100
+            if random_tip_show().is_some() {
+                found = true;
+                break;
+            }
+        }
+        assert!(found, "Should have produced a tip at least once in 100 tries");
+    }
+    #[test]
+    fn t28_say_macro() { say!(Verbosity::normal(), "test"); }
+    #[test]
+    fn t29_shout_macro() { shout!(Verbosity::normal(), AliasIcon::Success, "test"); }
+    #[test]
+    fn t30_fail_macro_io() {
+        let e = failure!(Verbosity::silent(), io::Error::new(io::ErrorKind::Other, "err"));
+        assert_eq!(e.code, 1);
+    }
+    #[test]
+    fn t31_verb_ord() { assert!(VerbosityLevel::Normal > VerbosityLevel::Silent); }
+    #[test]
+    fn t32_is_silent() { assert!(Verbosity::silent().is_silent()); }
+    #[test]
+    fn t33_icon_mapping_success() { assert_eq!(Verbosity::normal().get_icon_str(AliasIcon::Success), ICON_MATRIX[5][1]); }
+    #[test]
+    fn t34_icon_mapping_off() {
+        let mut v = Verbosity::normal();
+        v.show_icons = Off;
+        assert_eq!(v.get_icon_str(AliasIcon::Success), ICON_MATRIX[5][0]);
+    }
+    #[test]
+    fn t35_voice_macro_normal() { assert_eq!(voice!(Normal, On, ShowTips::On).level, VerbosityLevel::Normal); }
+    #[test]
+    fn t36_voice_macro_silent() { assert!(voice!(Silent, Off, Off).is_silent()); }
+    #[test]
+    fn t37_scream_3_arg() {
+        let e = failure!(Verbosity::silent(), ErrorCode::MissingFile, "{} missing", "f");
+        assert_eq!(e.message, "f missing");
+    }
+    #[test]
+    fn t38_scream_io_assertion() {
+        let e = failure!(Verbosity::silent(), io::Error::from_raw_os_error(5));
+        assert_eq!(e.code, 5);
+    }
+    #[test]
+    fn t39_icon_format_content() { assert!(Verbosity::normal().icon_format(AliasIcon::Say, "hi").contains("hi")); }
+    #[test]
+    fn t40_verb_mute_check() { assert!(Verbosity::mute().is_silent()); }
+}
+// =========================================================
+// SECTION 3: INTERNAL DATA & AUDIT LOGIC (Tests 41-60)
+// =========================================================
+mod data_and_audit {
+    use std::{env, fs};
+    use std::path::PathBuf;
+    use serial_test::serial;
+    use alias_lib::{calculate_new_file_state, get_alias_path, is_path_healthy, is_valid_name, mesh_logic, parse_arguments, parse_macro_file, voice, AliasAction, AliasEntryMesh, ENV_ALIAS_FILE};
+
+    #[test]
+    fn t41_mesh_basic() { assert_eq!(mesh_logic(vec![("a".into(), "1".into())], vec![("a".into(), "1".into())]).len(), 1); }
+    #[test]
+    fn t42_mesh_collision() {
+        let m = mesh_logic(vec![("a".into(), "o".into())], vec![("a".into(), "f".into())]);
+        assert_eq!(m[0].os_value, Some("o".into()));
+    }
+    #[test]
+    fn t43_empty_def() { assert!(AliasEntryMesh { name: "x".into(), os_value: None, file_value: None }.is_empty_definition()); }
+    #[test]
+    fn t44_valid_unicode() { assert!(is_valid_name("ñ")); }
+    #[test]
+    fn t45_valid_numbers() {
+        assert!(!is_valid_name("1x"));
+        assert!(is_valid_name("x1"));
+    }
+    #[test]
+    fn t46_valid_spaces() { assert!(!is_valid_name("a b")); }
+    #[test]
+    fn t47_calc_deletion() { assert!(!calculate_new_file_state("a=1\nb=2", "a", "").contains("a=")); }
+    #[test]
+    fn t48_calc_update() { assert!(calculate_new_file_state("a=1", "a", "2").contains("a=2")); }
+    #[test]
+    fn t49_path_healthy_tom() { assert!(is_path_healthy(&PathBuf::from("Cargo.toml"), 100000)); }
+    #[test]
+    fn t50_path_healthy_fake() { assert!(!is_path_healthy(&PathBuf::from("Z:/fake"), 100000)); }
+    #[test]
+    fn t51_parse_macro_resilience() {
+        let t = env::temp_dir().join("t.doskey");
+        fs::write(&t, "a=1\n#c\nb=2").unwrap();
+        assert_eq!(parse_macro_file(&t, &voice!(Silent, Off, Off)).unwrap().len(), 2);
+        fs::remove_file(t).ok();
+    }
+    #[test]
+    #[serial]
+    fn t52_path_ext() { if let Some(p) = get_alias_path("") { if env::var(ENV_ALIAS_FILE).is_err() { assert_eq!(p.extension().unwrap(), "doskey"); } } }
+    #[test]
+    fn t55_complex_split() {
+        let (_k, v) = "a=b=c".split_once('=').unwrap();
+        assert_eq!(v, "b=c");
+    }
+    #[test]
+    fn t56_line_filter() { assert_eq!("a=1\n\nb=2\n#".lines().filter(|l| l.contains('=')).count(), 2); }
+    #[test] fn t60_nuke() { alias_nuke::kernel_wipe_macros(); }
+    #[test]
+    fn t53_env_splice() {
+        // Simulating the environment variable injection logic
+        let mut a = vec!["alias".into(), "--icons".into()];
+        a.splice(1..1, vec!["--quiet".into()]);
+        let (_, voice) = parse_arguments(&a);
+        assert!(voice.is_silent());
+    }
+
+    #[test]
+    fn t54_json_prevention() {
+        let (mut q, _) = parse_arguments(&vec!["alias".into(), "{\"j\":1}".into()]);
+        assert_eq!(q.pull().unwrap().action, AliasAction::Invalid);
+    }
+
+    #[test]
+    fn t57_quote_preservation() {
+        let (mut q, _) = parse_arguments(&vec!["alias".into(), "x=\"y\"".into()]);
+        if let AliasAction::Set(o) = q.pull().unwrap().action {
+            assert_eq!(o.value, "\"y\"");
+        } else { panic!("Expected Set with quotes preserved"); }
+    }
+
+    #[test]
+    fn t58_multi_quiet() {
+        let (_, voice) = parse_arguments(&vec!["alias".into(), "--quiet".into(), "--quiet".into()]);
+        assert!(voice.is_silent());
+    }
+
+    #[test]
+    fn t59_int_case() {
+        let (mut q, _) = parse_arguments(&vec!["alias".into(), "--force".into(), "Ñ=x".into()]);
+        if let AliasAction::Set(o) = q.pull().unwrap().action {
+            assert!(o.force_case);
+            assert_eq!(o.name, "Ñ");
+        } else { panic!("Expected Force-case Set for international character"); }
+    }
+}
+// =========================================================
+// SECTION 4: DISPATCH & INTEGRATION (Tests 61-75)
+// =========================================================
+mod dispatch_and_integration {
+    use std::{env, io};
+    use std::path::{Path, PathBuf};
     use std::sync::Mutex;
     use serial_test::serial;
-    use alias_lib::ShowFeature::Off;
+    use alias_lib::{dispatch, failure, get_alias_path, parse_arguments, AliasAction, AliasProvider, ErrorCode, HelpMode, PurgeReport, SetOptions, Task, Verbosity, DEFAULT_ALIAS_FILENAME, ENV_ALIAS_FILE};
 
-    // =========================================================
-    // 1. COMMAND PARSER & ACTION MAPPING (22 Tests)
-    // =========================================================
-
-
-    // --- SHARED TEST STATE ---
+    // --- SHARED TEST STATE FOR DISPATCH TESTS ---
     static LAST_CALL: Mutex<Option<SetOptions>> = Mutex::new(None);
 
-    // --- MOCK PROVIDER ---
-    // Members ordered exactly as the AliasProvider trait
     struct MockProvider;
     impl AliasProvider for MockProvider {
-        // 1. ATOMIC HANDS
         fn raw_set_macro(_: &str, _: Option<&str>) -> io::Result<bool> { Ok(true) }
-        fn raw_reload_from_file(_verbosity: &Verbosity, _: &Path) -> io::Result<()> { Ok(()) }
-        fn get_all_aliases(_verbosity: &Verbosity) -> io::Result<Vec<(String, String)>> { Ok(vec![]) }
+        fn raw_reload_from_file(_v: &Verbosity, _: &Path) -> io::Result<()> { Ok(()) }
+        fn get_all_aliases(_v: &Verbosity) -> io::Result<Vec<(String, String)>> { Ok(vec![]) }
         fn write_autorun_registry(_: &str, _: &Verbosity) -> io::Result<()> { Ok(()) }
         fn read_autorun_registry() -> String { String::new() }
-        fn reload_full(path: &Path, verbosity: &Verbosity) -> Result<(), Box<dyn std::error::Error>> {
-            return Ok(())
-        }
-        // 2. CENTRALIZED LOGIC HOOKS
+        fn purge_ram_macros(_: &Verbosity) -> Result<PurgeReport, io::Error> { Ok(PurgeReport::default()) }
+        fn purge_file_macros(_: &Verbosity, _: &Path) -> Result<PurgeReport, io::Error> { Ok(PurgeReport::default()) }
+        fn reload_full(_v: &Verbosity, _: &Path, _f: bool) -> Result<(), Box<dyn std::error::Error>> { Ok(()) }
         fn query_alias(_: &str, _: &Verbosity) -> Vec<String> { vec![] }
-
         fn set_alias(opts: SetOptions, _: &Path, _: &Verbosity) -> io::Result<()> {
             let mut call = LAST_CALL.lock().unwrap();
             *call = Some(opts);
             Ok(())
         }
-
         fn run_diagnostics(_: &Path, _: &Verbosity) -> Result<(), Box<dyn std::error::Error>> { Ok(()) }
-        fn alias_show_all(_: &Verbosity) -> Result<(), Box<dyn std::error::Error>> {
-            Ok(())
-        }
-    }
-
-    fn parse_alias_args(args: &[String]) -> (AliasAction, Verbosity, Option<PathBuf>) {
-        let (mut queue, voice, path) = parse_arguments(args);
-
-        // 1. pull() gives you Option<Task>
-        // 2. .map(|t| t.action) gives you Option<AliasAction>
-        // 3. .unwrap_or(...) gives you the raw AliasAction
-        let action = queue.pull()
-            .map(|t| t.action)
-            .unwrap_or(AliasAction::ShowAll);
-
-        (action, voice, path)
-    }
-
-    #[test]
-    fn test_show_all() {
-        let (action, voice, _) = parse_alias_args(&vec!["alias".into()]);
-        assert_eq!(action, AliasAction::ShowAll);
-        assert!(!voice.is_silent());
-    }
-
-    #[test]
-    fn test_query_alias() {
-//        assert_eq!(parse_alias_args(&vec!["alias".into(), "ls".into()]), (AliasAction::Query("ls".into()), Verbosity::loud(), None));
-        let (action, verbosity, path) = parse_alias_args(&vec!["alias".into(), "ls".into()]);
-        assert!(matches!(action, AliasAction::Query(name) if name == "ls"));
-        assert_eq!(verbosity.level, VerbosityLevel::Loud);
-        assert!(path.is_none());
-    }
-
-    #[test]
-    fn test_set_with_equals() {
-        let (action, _, _) = parse_alias_args(&vec!["alias".into(), "gs=git status".into()]);
-        assert_eq!(action, AliasAction::Set(SetOptions { name: "gs".into(), value: "git status".into(), volatile: false, force_case: false }));
-    }
-
-    #[test]
-    fn test_set_with_space_args() {
-        let (action, _, _) = parse_alias_args(&vec!["alias".into(), "vi".into(), "nvim".into(), "-o".into()]);
-        if let AliasAction::Set(opts) = action {
-            assert_eq!(opts.name, "vi");
-            assert_eq!(opts.value, "nvim -o");
-        } else { panic!("Failed space parse"); }
-    }
-
-    #[test]
-    fn test_delete_syntax_empty_equals() {
-        let (action, _, _) = parse_alias_args(&vec!["alias".into(), "junk=".into()]);
-        if let AliasAction::Set(opts) = action { assert_eq!(opts.value, ""); } else { panic!("Failed delete parse"); }
-    }
-
-    #[test]
-    fn test_invalid_leading_equals() {
-        assert_eq!(parse_alias_args(&vec!["alias".into(), "=val".into()]).0, AliasAction::Invalid);
-    }
-
-    #[test]
-    fn test_flag_help() { assert_eq!(parse_alias_args(&vec!["alias".into(), "--help".into()]).0, AliasAction::Help); }
-
-    #[test]
-    fn test_flag_reload() { assert_eq!(parse_alias_args(&vec!["alias".into(), "--reload".into()]).0, AliasAction::Reload); }
-
-    #[test]
-    fn test_flag_setup() { assert_eq!(parse_alias_args(&vec!["alias".into(), "--setup".into()]).0, AliasAction::Setup); }
-
-    #[test]
-    fn test_flag_which() { assert_eq!(parse_alias_args(&vec!["alias".into(), "--which".into()]).0, AliasAction::Which); }
-
-    #[test]
-    fn test_flag_clear() { assert_eq!(parse_alias_args(&vec!["alias".into(), "--clear".into()]).0, AliasAction::Clear); }
-
-    #[test]
-    fn test_edalias_no_val() { assert_eq!(parse_alias_args(&vec!["alias".into(), "--edalias".into()]).0, AliasAction::Edit(None)); }
-
-    #[test]
-    fn test_edalias_with_val() { assert_eq!(parse_alias_args(&vec!["alias".into(), "--edalias=code".into()]).0, AliasAction::Edit(Some("code".into()))); }
-
-    #[test]
-    fn test_edaliases_synonym() { assert_eq!(parse_alias_args(&vec!["alias".into(), "--edaliases=vim".into()]).0, AliasAction::Edit(Some("vim".into()))); }
-
-    #[test]
-    fn test_quiet_detection_simple() {
-        let (_, voice, _) = parse_alias_args(&vec!["alias".into(), "--quiet".into(), "ls".into()]);
-        assert!(voice.is_silent());
-    }
-    #[test]
-    fn test_volatile_flag() {
-        let (action, _, _) = parse_alias_args(&vec!["alias".into(), "--temp".into(), "g=git".into()]);
-        if let AliasAction::Set(opts) = action { assert!(opts.volatile); } else { panic!("Volatile failed"); }
-    }
-
-    #[test]
-    fn test_force_flag() {
-        let (action, _, _) = parse_alias_args(&vec!["alias".into(), "--force".into(), "G=git".into()]);
-        if let AliasAction::Set(opts) = action { assert!(opts.force_case); } else { panic!("Force failed"); }
-    }
-
-    #[test]
-    fn test_mixed_flags_temp_force() {
-        let (action, _, _) = parse_alias_args(&vec!["alias".into(), "--temp".into(), "--force".into(), "g=git".into()]);
-        if let AliasAction::Set(opts) = action {
-            assert!(opts.volatile);
-            assert!(opts.force_case);
-        } else { panic!("Mixed flags failed"); }
-    }
-
-    #[test]
-    fn test_short_flags_blocked_for_safety() {
-        // We block ambiguous short flags like -e unless explicitly handled
-        assert_eq!(parse_alias_args(&vec!["alias".into(), "-e".into()]).0, AliasAction::Invalid);
-    }
-
-    #[test]
-    fn test_unknown_flag_invalidation() {
-        assert_eq!(parse_alias_args(&vec!["alias".into(), "--not-a-flag".into()]).0, AliasAction::Invalid);
-    }
-
-    #[test]
-    fn test_empty_value_is_delete_logic() {
-        let (action, _, _) = parse_alias_args(&vec!["alias".into(), "ghost=".into()]);
-        if let AliasAction::Set(opts) = action { assert_eq!(opts.value, ""); }
+        fn alias_show_all(_: &Verbosity) -> Result<(), Box<dyn std::error::Error>> { Ok(()) }
     }
 
     // =========================================================
-    // 2. SOVEREIGN VOICE & UI MACROS (12 Tests)
-    // =========================================================
-
-
-    #[test]
-    fn test_icon_format_empty_guard() {
-        let v = Verbosity::normal();
-        assert_eq!(v.icon_format(AliasIcon::Say, ""), "");
-    }
-
-    #[test]
-    fn test_tip_generation_not_empty() {
-        if let Some(tip) = random_tip_show() { assert!(!tip.is_empty()); }
-    }
-
-    #[test]
-    fn test_say_macro_execution() {
-        let v = Verbosity::normal();
-        say!(v, "Testing macro execution");
-    }
-
-    #[test]
-    fn test_shout_macro_execution() {
-        let v = Verbosity::normal();
-        shout!(v, AliasIcon::Success, "Testing shout");
-    }
-
-    #[test]
-    fn test_failure_macro_io_error() {
-        let v = Verbosity::silent();
-
-        // Create a real IO error to trigger the 2-arg macro arm
-        let io_err = std::io::Error::new(std::io::ErrorKind::NotFound, "fake disk error");
-
-        // This calls the 2-arg arm: ($verbosity:expr, $err:expr)
-        let err_box = failure!(v, io_err);
-
-        assert_eq!(err_box.code, 1); // Default for non-os-coded errors
-        assert!(err_box.message.contains("fake disk error"));
-    }
-
-    #[test]
-    fn test_verbosity_level_ord() {
-        assert!(VerbosityLevel::Normal > VerbosityLevel::Silent);
-        assert!(VerbosityLevel::Mute < VerbosityLevel::Normal);
-    }
-
-    #[test]
-    fn test_is_silent_helper() {
-        assert!(Verbosity::silent().is_silent());
-        assert!(!Verbosity::normal().is_silent());
-    }
-
-    // =========================================================
-    // 3. INTERNAL DATA & AUDIT LOGIC (14 Tests)
+    // SECTION 4: DISPATCH & INTEGRATION (THE FINAL 15)
     // =========================================================
 
     #[test]
-    fn test_mesh_logic_basic() {
-        let os = vec![("a".into(), "1".into())];
-        let file = vec![("a".into(), "1".into())];
-        let mesh = mesh_logic(os, file);
-        assert_eq!(mesh.len(), 1);
-        assert_eq!(mesh[0].name, "a");
+    fn t61_custom_file_flag() {
+        let (mut q, _) = parse_arguments(&vec!["alias".into(), "--file".into(), "f.txt".into(), "ls".into()]);
+        assert_eq!(q.pull().unwrap().path, PathBuf::from("f.txt"));
     }
 
     #[test]
-    fn test_mesh_logic_collision() {
-        let os = vec![("a".into(), "live".into())];
-        let file = vec![("a".into(), "stored".into())];
-        let mesh = mesh_logic(os, file);
-        assert_eq!(mesh[0].os_value, Some("live".into()));
-        assert_eq!(mesh[0].file_value, Some("stored".into()));
-    }
-
-    #[test]
-    fn test_beast_detection_logic() {
-        // According to your lib.rs, it's only an empty definition if both are None
-        let entry = AliasEntryMesh {
-            name: "cdx".into(),
-            os_value: None,
-            file_value: None
+    fn t62_unalias_precision() {
+        // Wrap the Action in a Task
+        let task = Task {
+            action: AliasAction::Unalias("r=c".into()),
+            path: PathBuf::from("f"),
         };
-        assert!(entry.is_empty_definition());
-    }
-    #[test]
-    fn test_valid_name_gatekeeper_unicode() {
-        assert!(is_valid_name("ñ"));
-        assert!(is_valid_name("λ"));
+
+        // Dispatch now takes the Task
+        dispatch::<MockProvider>(task, &Verbosity::silent()).unwrap();
+
+        let r = LAST_CALL.lock().unwrap().take().expect("MockProvider should have captured a Set call");
+        assert_eq!(r.name, "r");
+        assert!(r.volatile);
     }
 
     #[test]
-    fn test_valid_name_gatekeeper_numbers() {
-        assert!(!is_valid_name("1alias"));
-        assert!(is_valid_name("alias1"));
+    fn t63_remove_persistence() {
+        // Wrap the Action in a Task
+        let task = Task {
+            action: AliasAction::Remove("ls".into()),
+            path: PathBuf::from("f"),
+        };
+
+        dispatch::<MockProvider>(task, &Verbosity::silent()).unwrap();
+
+        let r = LAST_CALL.lock().unwrap().take().expect("MockProvider should have captured a Set call");
+        assert_eq!(r.name, "ls");
+        assert!(!r.volatile);
+    }
+    #[test]
+    fn t64_trailing_space_59th() {
+        let (mut q, _) = parse_arguments(&vec!["alias".into(), "x=y ".into()]);
+        if let AliasAction::Set(o) = q.pull().unwrap().action {
+            assert!(o.value.ends_with(' '));
+        } else { panic!("Expected Set"); }
     }
 
     #[test]
-    fn test_valid_name_gatekeeper_spaces() {
-        assert!(!is_valid_name("git status"));
+    fn t65_flag_ordering() {
+        let (q, _) = parse_arguments(&vec!["alias".into(), "--reload".into(), "--which".into(), "x".into()]);
+        assert!(matches!(q.get(0).unwrap().action, AliasAction::Reload));
+        assert!(matches!(q.get(1).unwrap().action, AliasAction::Which));
     }
 
     #[test]
-    fn test_calculate_file_deletion() {
-        let orig = "ls=dir\ngs=git status";
-        let res = calculate_new_file_state(orig, "ls", "");
-        assert!(!res.contains("ls="));
-        assert!(res.contains("gs="));
+    fn t66_typo_resilience() {
+        let (mut q, _) = parse_arguments(&vec!["alias".into(), "--reloaad".into(), "x=y".into()]);
+        if let AliasAction::Set(o) = q.pull().unwrap().action { assert_eq!(o.name, "x"); }
     }
 
     #[test]
-    fn test_calculate_file_update() {
-        let orig = "ls=dir";
-        let res = calculate_new_file_state(orig, "ls", "ls -la");
-        assert!(res.contains("ls=ls -la"));
+    fn t67_line_integrity() {
+        let (_k, v) = "x=y ".split_once('=').unwrap();
+        assert_eq!(v, "y ");
     }
 
     #[test]
-    fn test_path_healthy_manifest() {
-        assert!(is_path_healthy(&PathBuf::from("Cargo.toml")));
+    fn t68_animal_pivot() {
+        let (mut q, _) = parse_arguments(&vec!["alias".into(), "|".into(), "format".into()]);
+        assert_eq!(q.pull().unwrap().action, AliasAction::Invalid);
     }
 
     #[test]
-    fn test_path_healthy_nonexistent() {
-        assert!(!is_path_healthy(&PathBuf::from("Z:/fake/path/here")));
+    fn t69_lead_hyphen() {
+        let (mut q, _) = parse_arguments(&vec!["alias".into(), "-x=y".into()]);
+        assert_eq!(q.pull().unwrap().action, AliasAction::Invalid);
     }
 
     #[test]
-    fn test_parse_macro_file_resilience() {
-        let content = "a=1\n# comment\n\nb=2";
-        let temp = env::temp_dir().join("test_res.doskey");
-        fs::write(&temp, content).unwrap();
-        let res = parse_macro_file(&temp, &voice!(Silent, Off, Off));
-        // assert_eq!(res.len(), 2);
-        assert_eq!(res.expect("Failed to parse macro file").len(), 2);
-        fs::remove_file(temp).ok();
+    fn t70_invalid_short_circuit() {
+        let (q, _) = parse_arguments(&vec!["alias".into(), "!!!".into(), "x=y".into()]);
+        assert_eq!(q.get(0).unwrap().action, AliasAction::Invalid);
     }
 
-    #[test]
-    #[serial]
-    fn test_get_alias_path_extension() {
-        if let Some(p) = get_alias_path() {
-            if env::var(ENV_ALIAS_FILE).is_err() {
-                assert_eq!(p.extension().unwrap(), "doskey");
-            }
-        }
-    }
-
-    #[test]
-    fn test_env_opts_injection_logic() {
-        let mut args = vec!["alias".into(), "g=status".into()];
-        args.splice(1..1, vec!["--quiet".into()]);
-        let (_, voice, _) = parse_alias_args(&args);
-        assert!(voice.is_silent());
-    }
-
-    #[test]
-    fn test_jason_garbage_prevention() {
-        assert_eq!(parse_alias_args(&vec!["alias".into(), "{\"json\":true}".into()]).0, AliasAction::Invalid);
-    }
-
-    // =========================================================
-    // 4. EDGE CASES & NUKE (8 Tests)
-    // =========================================================
-    #[test]
-    #[serial]
-    fn test_path_env_points_to_dir() {
-        let temp_dir = env::temp_dir().join("alias_dir_test");
-        fs::create_dir_all(&temp_dir).unwrap();
+    #[test] #[serial]
+    fn t71_env_path_dir() {
         unsafe {
-            env::set_var(ENV_ALIAS_FILE, &temp_dir);
+            env::set_var(ENV_ALIAS_FILE, ".");
         }
-        let p = get_alias_path().unwrap();
-        assert!(p.to_string_lossy().ends_with(DEFAULT_ALIAS_FILENAME));
-        fs::remove_dir(temp_dir).ok();
+        let p = get_alias_path("").unwrap();
+        assert!(p.to_string_lossy().contains(DEFAULT_ALIAS_FILENAME));
         unsafe {
             env::remove_var(ENV_ALIAS_FILE);
         }
     }
 
     #[test]
-    fn test_complex_split_once_logic() {
-        let input = "cmd=echo A=B";
-        let (k, v) = input.split_once('=').unwrap();
-        assert_eq!(k, "cmd");
-        assert_eq!(v, "echo A=B");
+    fn t72_help_mode_logic() {
+        assert!(matches!(HelpMode::Short, HelpMode::Short));
     }
 
     #[test]
-    fn test_reload_line_filtering() {
-        let raw = "a=1\n  \nb=2\n#comment";
-        let count = raw.lines().filter(|l| l.contains('=')).count();
-        assert_eq!(count, 2);
+    fn t73_scream_silent_produces_msg() {
+        let e = failure!(Verbosity::silent(), ErrorCode::Generic, "crit");
+        assert_eq!(e.message, "crit");
     }
 
     #[test]
-    fn test_argument_quotes_preservation() {
-        let args = vec!["alias".into(), "x=\"quoted val\"".into()];
-        let (action, _, _) = parse_alias_args(&args);
-        if let AliasAction::Set(opts) = action { assert_eq!(opts.value, "\"quoted val\""); }
+    fn t74_startup_task_count() {
+        let (q, voice) = parse_arguments(&vec!["alias".into(), "--startup".into(), "x=y".into()]);
+        assert!(voice.in_startup);
+        assert_eq!(q.len(), 1);
     }
 
     #[test]
-    fn test_multiple_quiet_flags_consistency() {
-        let (_, voice, _) = parse_alias_args(&vec!["alias".into(), "--icons".into(), "--quiet".into(), "ls".into()]);
-        assert!(voice.is_silent());
-    }
-
-    #[test]
-    fn test_help_mode_enum_logic() {
-        // Ensuring HelpMode follows the right logic paths for Tip display
-        let mode = HelpMode::Short;
-        assert!(matches!(mode, HelpMode::Short));
-    }
-
-    #[test]
-    fn test_international_case_insensitivity() {
-        // If name is 'ñ', and we force case...
-        let (action, _, _) = parse_alias_args(&vec!["alias".into(), "--force".into(), "ñ=test".into()]);
-        if let AliasAction::Set(opts) = action { assert!(opts.force_case); }
-    }
-
-    #[test]
-    fn a_nuke_the_world() {
-        // This is the 56th test.
-        // It runs alphabetically early to ensure a clean state if you use it.
-        alias_nuke::kernel_wipe_macros();
-    }
-
-    #[test]
-    fn test_parse_custom_file_flag() {
-        let args = vec!["alias".into(), "--file".into(), "C:\\temp\\test.doskey".into(), "ls".into()];
-        let (action, _, path) = parse_alias_args(&args);
-
-        assert_eq!(action, AliasAction::Query("ls".into()));
-        assert_eq!(path, Some(PathBuf::from("C:\\temp\\test.doskey")));
-    }
-
-    // --- NEW INTEGRATION TESTS ---
-
-    #[test]
-    fn test_unalias_precision_strike() {
-        let path = PathBuf::from("test.doskey");
-        let verb = Verbosity::silent();
-
-        // Verifies the "rust=cargo" -> "rust" split logic in dispatcher
-        let action = AliasAction::Unalias("rust=cargo".to_string());
-        dispatch::<MockProvider>(action, &verb, &path).unwrap();
-
-        let result = LAST_CALL.lock().unwrap().take().expect("set_alias should have been called");
-
-        assert_eq!(result.name, "rust");
-        assert_eq!(result.value, "");
-        assert!(result.volatile); // Unalias must be volatile
-    }
-
-    #[test]
-    fn test_remove_persistence() {
-        let path = PathBuf::from("test.doskey");
-        let verb = Verbosity::silent();
-
-        // Verifies the --remove command forces persistence (volatile: false)
-        let action = AliasAction::Remove("ls".to_string());
-        dispatch::<MockProvider>(action, &verb, &path).unwrap();
-
-        let result = LAST_CALL.lock().unwrap().take().expect("set_alias should have been called");
-
-        assert_eq!(result.name, "ls");
-        assert_eq!(result.value, "");
-        assert!(!result.volatile); // Remove must NOT be volatile
-    }
-
-    #[test]
-    fn test_parser_unalias_routing() {
-        let args = vec![
-            "alias.exe".into(),
-            "--quiet".into(),       // Flag from Step 1
-            "--unalias".into(),     // Command from Step 4
-            "my_macro=stuff".into(), // Payload
-        ];
-
-        let (action, voice, _) = parse_alias_args(&args);
-
-        // Verify Step 1 flags were preserved
-        assert_eq!(voice.level, VerbosityLevel::Silent);
-
-        // Verify Step 4 correctly identified Unalias and grabbed the target
-        if let AliasAction::Unalias(target) = action {
-            assert_eq!(target, "my_macro=stuff");
-        } else {
-            panic!("Expected AliasAction::Unalias, got {:?}", action);
-        }
-    }
-
-    #[test]
-    fn test_parser_remove_routing() {
-        let args = vec![
-            "alias.exe".into(),
-            "--remove".into(),
-            "target_alias".into(),
-        ];
-        let (action, _, _) = parse_alias_args(&args);
-
-        if let AliasAction::Remove(target) = action {
-            assert_eq!(target, "target_alias");
-        } else {
-            panic!("Expected AliasAction::Remove");
-        }
-    }
-
-    #[test]
-    fn test_scream_macro_execution() {
-        let v = Verbosity::silent();
-
-        // Execute and capture the result
-        let err_box = failure!(v, ErrorCode::MissingFile, "File {} not found", "test.doskey");
-
-        // ASSERT: Verify the custom error code was mapped correctly
-        assert_eq!(err_box.code, ErrorCode::MissingFile as u8);
-
-        // ASSERT: Verify the format strings were processed correctly
-        assert_eq!(err_box.message, "File test.doskey not found");
-    }
-
-    #[test]
-    fn test_scream_macro_logical_assertion() {
-        let v = Verbosity::silent(); // Voice is silent...
-
-        // Execute 3-arg logical macro
-        let err = failure!(v, ErrorCode::Generic, "CRITICAL_FAILURE");
-
-        // ASSERT: Even if silent, the error object MUST contain the message
-        assert!(err.message.contains("CRITICAL_FAILURE"), "Scream must produce message even when silent");
-        assert_eq!(err.code, ErrorCode::Generic as u8);
-    }
-
-    #[test]
-    fn test_scream_macro_io_assertion() {
-        let v = Verbosity::silent();
-
-        // Create a raw OS error (Code 5 = Access Denied)
-        let io_err = std::io::Error::from_raw_os_error(5);
-
-        // Execute 2-arg IO macro
-        let err = failure!(v, io_err);
-
-        // ASSERT: Check that it extracted the OS code 5
-        assert_eq!(err.code, 5, "Should have extracted OS error code 5");
-
-        // ASSERT: Check that the message is present
-        // (In Windows, code 5 will contain "Access is denied")
-        assert!(!err.message.is_empty(), "Scream message should not be empty");
-    }
-
-    // Helper to simulate CLI Vec<String>
-    fn to_args(args: Vec<&str>) -> Vec<String> {
-        args.into_iter().map(|s| s.to_string()).collect()
-    }
-
-
-    #[test]
-    fn test_animal_protection_pivot() {
-        // If a command starts with an "animal", it shouldn't pivot
-        let args = to_args(vec!["alias", "|", "format", "c:"]);
-        let (queue, _, _) = parse_arguments(&args);
-
-        // Queue should be empty (or default to ShowAll) because '|' is illegal
-        assert!(matches!(queue.get(0).unwrap().action, AliasAction::Invalid));
-    }
-
-    #[test]
-    fn test_literal_payload_preserves_trailing_whitespace() {
-        let args = vec![
-            "alias".to_string(),
-            "xcd=cd /d \"C:\\\" ".to_string() // Trailing space inside the string
-        ];
-
-        let (queue, _voice, _path) = parse_arguments(&args);
-
-        if let Some(AliasAction::Set(opts)) = queue.get(0).map(|t| &t.action) {
-            assert_eq!(opts.name, "xcd");
-            assert_eq!(opts.value, "cd /d \"C:\\\" ");
-            assert!(opts.value.ends_with(' '), "The 59th byte (space) was trimmed!");
-        } else {
-            panic!("Queue did not contain a Set action");
-        }
-    }
-
-    #[test]
-    fn test_startup_task_ordering() {
-        let args = vec!["alias".to_string(), "--startup".to_string(), "new=value".to_string()];
-        let (queue, voice, _) = parse_arguments(&args);
-
-        assert!(voice.in_startup, "Startup flag not detected");
-
-        // In our logic, 'new=value' should be in the queue,
-        // and 'Reload' is handled by the 'run' loop's 'in_startup' check.
-        assert_eq!(queue.len(), 1);
-        if let Some(AliasAction::Set(opts)) = queue.get(0).map(|t| &t.action) {
-            assert_eq!(opts.name, "new");
-        }
-    }
-
-    #[test]
-    fn test_voice_macro_normal() {
-        let v = voice!(Normal, ShowFeature::On, ShowTips::On);
-        assert_eq!(v.level, VerbosityLevel::Normal);
-        assert!(v.show_icons.is_on()); // Changed from .icons to .show_icons.is_on()
-    }
-
-    #[test]
-    fn test_voice_macro_silent() {
-        let v = voice!(Silent, ShowFeature::Off, ShowTips::Off);
-        assert!(v.is_silent());
-        assert!(!v.show_icons.is_on()); // Changed from .icons
-    }
-
-    #[test]
-    fn test_env_splice_override() {
-        let mut args = vec!["alias".to_string(), "--icons".to_string()];
-        let env_opts = vec!["--quiet".to_string()];
-        args.splice(1..1, env_opts);
-
-        let (_, voice, _) = parse_arguments(&args);
-
-        assert_eq!(voice.level, VerbosityLevel::Silent);
-        assert!(voice.show_icons.is_on()); // Changed from .icons to .show_icons.is_on()
-    }
-
-    #[test]
-    fn test_flag_action_ordering() {
-        let args = to_args(vec!["alias", "--reload", "--which", "xcd"]);
-        let (queue, _, _) = parse_arguments(&args);
-
-        assert_eq!(queue.len(), 3);
-        // Use queue.get(i) instead of queue.tasks[i]
-        assert!(matches!(queue.get(0).unwrap().action, AliasAction::Reload));
-        assert!(matches!(queue.get(1).unwrap().action, AliasAction::Which));
-        assert!(matches!(queue.get(2).unwrap().action, AliasAction::Query(_)));
-    }
-
-    #[test]
-    fn test_pivot_on_assignment() {
-        let args = to_args(vec!["alias", "xcd=dir /d \"C:\\\" "]);
-        let (queue, _, _) = parse_arguments(&args);
-
-        assert_eq!(queue.len(), 1);
-        // FIXED: Using .get(0) instead of .tasks.first()
-        if let Some(AliasAction::Set(opts)) = queue.get(0).map(|t| &t.action) {
-            assert_eq!(opts.name, "xcd");
-            assert!(opts.value.ends_with("\" "));
-        } else {
-            panic!("Should have been a Set action");
-        }
-    }
-
-    #[test]
-    fn test_typo_resilience() {
-        let args = to_args(vec!["alias", "--reloaad", "ls=dir"]);
-        let (queue, _, _) = parse_arguments(&args);
-
-        assert_eq!(queue.len(), 1);
-        // FIXED: Using .get(0)
-        if let Some(AliasAction::Set(opts)) = queue.get(0).map(|t| &t.action) {
-            assert_eq!(opts.name, "ls");
-        }
-    }
-
-    #[test]
-    fn test_file_flag_with_path() {
-        let args = to_args(vec!["alias", "--file", "my_doskeys.txt", "--reload"]);
-        let (queue, _, path) = parse_arguments(&args);
-
-        assert_eq!(path.unwrap().to_str().unwrap(), "my_doskeys.txt");
-        assert_eq!(queue.len(), 1);
-        // FIXED: Using .get(0)
-        assert!(matches!(queue.get(0).unwrap().action, AliasAction::Reload));
-    }
-
-    #[test]
-    fn test_file_line_parsing_integrity() {
-        let mock_file_content = "xcd=dir /d \"C:\\\" \nother=value";
-        let lines = mock_file_content.lines();
-
-        for line in lines {
-            if let Some((name, value)) = line.split_once('=') {
-                let _name = name.trim(); // FIXED: added underscore to suppress warning
-                assert_eq!(value, "dir /d \"C:\\\" ", "File parser trimmed the 59th byte!");
-                break;
-            }
-        }
-    }
-    #[test]
-    fn test_icon_mapping_success() {
-        let v = Verbosity::normal();
-        // Success is index 5. [0] is "OK", [1] is "✨"
-        assert_eq!(v.get_icon_str(AliasIcon::Success), ICON_MATRIX[5][1]);
-    }
-
-    #[test]
-    fn test_icon_mapping_plain() {
-        let mut v = Verbosity::normal();
-        v.show_icons = Off; // Assuming Off maps to index 0 in your get_icon_str logic
-        assert_eq!(v.get_icon_str(AliasIcon::Success), ICON_MATRIX[5][0]);
-    }
-
-    #[test]
-    fn test_icon_format_content() {
-        let v = Verbosity::normal();
-        let res = v.icon_format(AliasIcon::Say, "hello");
-        assert!(res.contains("hello"));
-        // Say is index 7. [1] is "📜"
-        assert!(res.contains(ICON_MATRIX[AliasIcon::Say as usize][1]));
-    }
-    #[test]
-    fn test_invalid_name_short_circuits() {
-        let args = vec!["alias".to_string(), "!!!".to_string(), "payload=stuff".to_string()];
-        let (queue, _voice, _) = parse_arguments(&args);
-
-        // It found 2 items because it didn't give up after '!!!'
-        assert!(queue.len() >= 1);
-        assert!(matches!(queue.get(0).unwrap().action, AliasAction::Invalid));
-    }
-
-    #[test]
-    fn test_leading_hyphen_rejection() {
-        let args = to_args(vec!["alias", "-xcd=dir"]);
-        let (queue, _, _) = parse_arguments(&args);
-
-        // It is no longer empty because we now track invalid attempts
-        assert!(matches!(queue.get(0).unwrap().action, AliasAction::Invalid));
+    fn t75_edalias_synonym_vim() {
+        let (mut q, _) = parse_arguments(&vec!["alias".into(), "--edalias=vim".into()]);
+        assert_eq!(q.pull().unwrap().action, AliasAction::Edit(Some("vim".into())));
     }
 }

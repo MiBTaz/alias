@@ -3,6 +3,16 @@ use winreg::RegKey;
 #[allow(unused_imports)]
 use winreg::enums::HKEY_CURRENT_USER;
 
+#[cfg(test)]
+#[ctor::ctor]
+fn init() {
+    unsafe {
+        std::env::remove_var("ALIAS_FILE");
+        std::env::remove_var("ALIAS_OPTS");
+        std::env::remove_var("ALIAS_PATH");
+    }
+}
+
 #[test]
 #[serial]
 fn test_registry_append_logic() {

@@ -1,5 +1,15 @@
 // alias_wrapper/tests/wrapper_library_tests.rs
 
+#[cfg(test)]
+#[ctor::ctor]
+fn init() {
+    unsafe {
+        std::env::remove_var("ALIAS_FILE");
+        std::env::remove_var("ALIAS_OPTS");
+        std::env::remove_var("ALIAS_PATH");
+    }
+}
+
 // use alias_lib::*;
 use alias_wrapper::WrapperLibraryInterface as P;
 

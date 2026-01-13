@@ -2,7 +2,18 @@ use std::io;
 use std::path::Path;
 use std::sync::Mutex;
 use serial_test::serial;
-use alias_lib::{AliasProvider, SetOptions, Verbosity};
+use alias_lib::{AliasProvider, PurgeReport, SetOptions, Verbosity};
+use lazy_static::lazy_static;
+
+#[cfg(test)]
+#[ctor::ctor]
+fn init() {
+    unsafe {
+        std::env::remove_var("ALIAS_FILE");
+        std::env::remove_var("ALIAS_OPTS");
+        std::env::remove_var("ALIAS_PATH");
+    }
+}
 
 macro_rules! trace {
     ($($arg:tt)*) => {
@@ -10,6 +21,18 @@ macro_rules! trace {
     };
 }
 
+lazy_static! {
+    // This holds the arguments passed to the last 'set_alias' call
+    static ref LAST_CALL: Mutex<Option<SetOptions>> = Mutex::new(None);
+}
+
+#[allow(dead_code)]
+fn get_captured_set() -> SetOptions {
+    LAST_CALL.lock()
+        .expect("Mutex poisoned")
+        .take() // Clears it for the next test
+        .expect("The dispatcher never called the provider!")
+}
 
 // Define this once at the module level
 struct MockProvider;
@@ -37,18 +60,26 @@ impl AliasProvider for MockProvider {
     }
     // MATCH: Path instead of str
     fn raw_reload_from_file(_: &Verbosity, _: &std::path::Path) -> io::Result<()> { Ok(()) }
-/*
-    fn get_all_aliases(_: &Verbosity) -> io::Result<Vec<(String, String)>> {
-        Ok(vec![
-            ("alias1".into(), "val1".into()),
-            ("alias2".into(), "val2".into()),
-        ])
+    fn reload_full(_verbosity: &Verbosity, _file_path: &Path, _force: bool) -> Result<(), Box<dyn std::error::Error>> {
+        Ok(())
     }
+    fn write_autorun_registry(_: &str, _: &Verbosity) -> io::Result<()> { Ok(()) }
+    fn purge_ram_macros(v: &Verbosity) -> Result<PurgeReport, std::io::Error> {
+        let mut report = PurgeReport::default();
 
- */
+        // 1. Get the current list of what's in RAM
+        let aliases = Self::get_all_aliases(v)?;
 
-        fn write_autorun_registry(_: &str, _: &Verbosity) -> io::Result<()> { Ok(()) }
+        // 2. Clear the RAM
+        for (name, _) in aliases {
+            // Use our own raw_set_macro (passing None triggers the removal)
+            Self::raw_set_macro(&name, None)?;
+            report.cleared.push(name);
+        }
 
+        Ok(report)
+    }
+    fn purge_file_macros(_: &Verbosity, _: &Path) -> Result<PurgeReport, std::io::Error> { Ok(PurgeReport::default()) }
     // MATCH: Returns String directly, not Result
     fn read_autorun_registry() -> String { String::new() }
 
@@ -57,7 +88,11 @@ impl AliasProvider for MockProvider {
     fn query_alias(_: &str, _: &Verbosity) -> Vec<String> { vec![] }
 
     // MATCH: Param 1 is SetOptions, Param 2 is &Path
-    fn set_alias(_: SetOptions, _: &std::path::Path, _: &Verbosity) -> io::Result<()> { Ok(()) }
+    fn set_alias(opts: SetOptions, _path: &Path, _v: &Verbosity) -> io::Result<()> {
+        let mut call = LAST_CALL.lock().unwrap();
+        *call = Some(opts); // This records the work dispatch did
+        Ok(())
+    }
 
     // MATCH: &Path and Result<(), Box<dyn Error>>
     fn run_diagnostics(_: &std::path::Path, v: &Verbosity) -> Result<(), Box<dyn std::error::Error>> {
@@ -68,6 +103,7 @@ impl AliasProvider for MockProvider {
 
     // MATCH: Result<(), Box<dyn Error>>
     fn alias_show_all(_: &Verbosity) -> Result<(), Box<dyn std::error::Error>> { Ok(()) }
+
 }
 
 #[cfg(test)]
@@ -833,18 +869,18 @@ mod alias_action_tests {
         let action = AliasAction::Set(opts);
 
         // Ensure the display string correctly identifies the intent
-        assert_eq!(format!("{}", action), "Set alias: ls");
+        assert_eq!(format!("{}", action.error()), "Error setting alias: ls");
     }
 
     #[test]
     fn test_display_fidelity_edit() {
         // Case A: Custom Editor
         let action_custom = AliasAction::Edit(Some("code.exe".to_string()));
-        assert!(format!("{}", action_custom).contains("code.exe"));
+        assert!(format!("{}", action_custom.error()).contains("code.exe"));
 
         // Case B: Default Editor
         let action_default = AliasAction::Edit(None);
-        assert!(format!("{}", action_default).contains("default editor"));
+        assert!(format!("{}", action_default.error()).contains("default editor"));
     }
 
     #[test]
@@ -1076,7 +1112,7 @@ mod path_resolution_tests {
             std::env::set_var(ENV_ALIAS_FILE, test_path);
         }
 
-        let resolved = get_alias_path().unwrap();
+        let resolved = get_alias_path("").unwrap();
         assert_ne!(resolved.to_str().unwrap(), test_path);
         unsafe {
             std::env::remove_var(ENV_ALIAS_FILE);
@@ -1095,7 +1131,7 @@ mod path_resolution_tests {
             std::env::set_var(ENV_ALIAS_FILE, test_path.to_str().unwrap());
         }
 
-        let resolved = get_alias_path().unwrap();
+        let resolved = get_alias_path("").unwrap();
         trace!("Resolved={:?}", resolved);
         assert_eq!(resolved, test_path);
         unsafe {
@@ -1113,7 +1149,7 @@ mod path_resolution_tests {
             std::env::set_var(ENV_ALIAS_FILE, temp_dir.to_str().unwrap());
         }
 
-        let resolved = get_alias_path().unwrap();
+        let resolved = get_alias_path("").unwrap();
         trace!("Resolved={:?}", resolved);
         assert!(resolved.ends_with(DEFAULT_ALIAS_FILENAME));
         unsafe {
@@ -1126,7 +1162,7 @@ mod path_resolution_tests {
     fn test_fallback_search_logic() {
         // Ensure that if ENV is missing, we at least get a path back
         // provided APPDATA or USERPROFILE exists on the test machine.
-        let path = get_alias_path();
+        let path = get_alias_path("");
         if let Some(p) = path {
             assert!(p.is_absolute());
             assert!(p.to_str().unwrap().contains("alias_tool"));
@@ -1367,6 +1403,7 @@ mod battery_8 {
                 show_tips: alias_lib::ShowTips::Off,
                 display_tip: None,
                 in_startup: false,
+                in_setup: false,
                 writer: Some(buffer), // buffer is moved into v here
             };
 
@@ -1437,7 +1474,7 @@ mod battery_8 {
 mod battery_9 {
     use std::fs;
     use tempfile::tempdir;
-    use alias_lib::is_path_healthy;
+    use alias_lib::{is_path_healthy, MAX_ALIAS_FILE_SIZE};
     // Requires tempfile crate for "Steel" testing
 
     #[test]
@@ -1447,15 +1484,15 @@ mod battery_9 {
         let folder_path = dir.path().join("subfolder");
 
         // 1. Test: Path does not exist
-        assert!(!is_path_healthy(&file_path), "Missing file should be unhealthy");
+        assert!(!is_path_healthy(&file_path,MAX_ALIAS_FILE_SIZE), "Missing file should be unhealthy");
 
         // 2. Test: Path is a valid file
         fs::write(&file_path, "g=git status").expect("Failed to write test file");
-        assert!(is_path_healthy(&file_path), "Existing file should be healthy");
+        assert!(is_path_healthy(&file_path,MAX_ALIAS_FILE_SIZE), "Existing file should be healthy");
 
         // 3. Test: Path is a directory (The "Fake-out" scenario)
         fs::create_dir(&folder_path).expect("Failed to create test dir");
-        assert!(!is_path_healthy(&folder_path), "A directory should be unhealthy");
+        assert!(!is_path_healthy(&folder_path,MAX_ALIAS_FILE_SIZE), "A directory should be unhealthy");
     }
 }
 
@@ -1738,34 +1775,52 @@ mod battery_16 {
 
 #[cfg(test)]
 mod battery_17 {
-    use alias_lib::{dispatch, AliasAction, Verbosity};
+    use alias_lib::{dispatch, AliasAction, Task, Verbosity};
     use super::*;
 
     #[test]
     fn test_dispatch_unalias_formatting() {
-        let path = std::path::Path::new("test.doskey");
+        let file_path = std::path::PathBuf::from("test.doskey"); // Use PathBuf for Task
         let verbosity = Verbosity::silent();
 
-        // We want to verify that "g=something" is cleaned to "g"
+        // The raw action remains the same
         let action = AliasAction::Unalias("  g=something  ".to_string());
 
-        // In a real test with a MockProvider, you'd assert that
-        // MockProvider::set_alias was called with name == "g"
-        // and value == ""
-        assert!(dispatch::<MockProvider>(action, &verbosity, path).is_ok());
+        // 1. Wrap them into the Task struct
+        let task = Task {
+            action,
+            path: file_path, // Task owns this path now
+        };
+
+        // 2. Dispatch now takes exactly TWO arguments: (Task, &Verbosity)
+        assert!(dispatch::<MockProvider>(task, &verbosity).is_ok());
+
+        // 3. Verify the MockProvider captured the cleaned result
+        let captured = LAST_CALL.lock().unwrap().take().expect("Mock should have been called");
+        assert_eq!(captured.name, "g");
+        assert_eq!(captured.value, "");
     }
 
     #[test]
     fn test_dispatch_invalid_name_error() {
-        let path = std::path::Path::new("test.doskey");
-        // Sending an empty string to Unalias
+        let file_path = std::path::PathBuf::from("test.doskey");
+
+        // An empty or whitespace-only string should fail validation
         let action = AliasAction::Unalias("   ".to_string());
 
-        let result = dispatch::<MockProvider>(action, &Verbosity::silent(), path);
+        // 1. Wrap it in a Task
+        let task = Task {
+            action,
+            path: file_path,
+        };
+
+        // 2. Pass Task and &Verbosity
+        let result = dispatch::<MockProvider>(task, &Verbosity::silent());
+
+        // 3. Verify it failed
         assert!(result.is_err(), "Should return an error for empty names");
     }
 }
-
 #[cfg(test)]
 mod battery_18 {
     use alias_lib::{parse_arguments, AliasAction};
@@ -1780,18 +1835,24 @@ mod battery_18 {
             "g".into(), "=".into(), "git".into(), "status".into()
         ];
 
-        let (queue, _voice, path) = parse_arguments(&args);
+        // FIX 1: Correct order (TaskQueue, Verbosity)
+        let (mut queue, _voice) = parse_arguments(&args);
 
-        // 1. Path should be captured
-        assert_eq!(path.unwrap().to_str().unwrap(), "my.txt");
+        // FIX 2: Pull the first task out to inspect it
+        let mut task = queue.pull().expect("Should have parsed at least one task");
 
-        // 2. Action should be 'Set' with volatile=true
-        if let AliasAction::Set(opts) = &queue[0].action {
+        // FIX 3: Check the path on the TASK, not as a standalone variable
+        assert_eq!(task.path.to_str().unwrap(), "my.txt");
+
+        task = queue.pull().expect("Should have parsed at least one task");
+
+        // FIX 4: Check the action inside that same task
+        if let AliasAction::Set(opts) = task.action {
             assert_eq!(opts.name, "g");
             assert_eq!(opts.value, "git status");
-            assert!(opts.volatile);
+            assert!(opts.volatile); // --temp was passed
         } else {
-            panic!("Expected Set action");
+            panic!("Expected Set action, found {:?}", task.action);
         }
     }
 
@@ -1799,30 +1860,36 @@ mod battery_18 {
     fn test_parse_query_fallback() {
         // Input: alias --quiet my_alias
         let args = vec!["alias.exe".into(), "--quiet".into(), "my_alias".into()];
-        let (queue, _voice, _) = parse_arguments(&args);
 
-        match &queue[0].action {
+        // FIX: Swap the names so 'queue' is the TaskQueue
+        let (queue, _voice) = parse_arguments(&args);
+
+        // Now 'queue' is a TaskQueue, so .get(0) exists!
+        match &queue.get(0).expect("Queue should have 1 task").action {
             AliasAction::Query(name) => assert_eq!(name, "my_alias"),
             _ => panic!("Expected Query action"),
         }
     }
 }
 
+
 #[cfg(test)]
 mod battery_19 {
-    use alias_lib::{parse_arguments, AliasAction, VerbosityLevel};
+    use alias_lib::{get_alias_path, parse_arguments, AliasAction, VerbosityLevel};
 
     #[test]
     fn test_parser_pivot_with_ugly_spacing() {
         // Input: alias --temp   g   =   "git status"
-        // The join(" ") logic should handle the gaps between g, =, and the value.
         let args = vec![
             "alias".into(), "--temp".into(),
             "g".into(), "=".into(), "\"git status\"".into()
         ];
-        let (queue, _, _) = parse_arguments(&args);
 
-        if let AliasAction::Set(opts) = &queue[0].action {
+        // FIX: queue must be first to receive the TaskQueue
+        let (queue, _) = parse_arguments(&args);
+
+        // FIX: Access the internal tasks vector
+        if let AliasAction::Set(opts) = &queue.tasks[0].action {
             assert_eq!(opts.name, "g");
             assert_eq!(opts.value, "\"git status\"");
             assert!(opts.volatile);
@@ -1834,205 +1901,223 @@ mod battery_19 {
     #[test]
     fn test_parser_ignores_garbage_flags() {
         // Input: alias --not-a-real-flag --quiet g=ls
-        // Should scream about the unknown flag but still process g=ls
         let args = vec!["alias".into(), "--not-a-real-flag".into(), "--quiet".into(), "g=ls".into()];
-        let (queue, voice, _) = parse_arguments(&args);
 
+        // 1. Unpack correctly: (TaskQueue, Verbosity)
+        let (mut queue, voice) = parse_arguments(&args);
+
+        // 2. Verify the Verbosity (Voice)
         assert_eq!(voice.level, VerbosityLevel::Silent);
-        match &queue[0].action {
-            AliasAction::Set(opts) => assert_eq!(opts.name, "g"),
-            _ => panic!("Should have recovered from bad flag to process the payload"),
+
+        // 3. Use .pull() to get the Task.
+        // This avoids the "cannot index" error if TaskQueue doesn't implement Index.
+        // the bad flag
+        let garbage = queue.pull().expect("Should have the invalid flag task");
+        assert!(matches!(garbage.action, AliasAction::Invalid), "First task should be Invalid");
+        // and the set
+        let task = queue.pull().expect("Should have recovered from bad flag to process the payload");
+
+        if let AliasAction::Set(opts) = task.action {
+            assert_eq!(opts.name, "g");
+            assert_eq!(opts.value, "ls");
+        } else {
+            panic!("Expected a Set action, but got: {:?}", task.action);
         }
     }
-
     #[test]
     fn test_parser_illegal_name_detection() {
         // Input: alias "bad name"=value
-        // Should trigger AliasAction::Invalid or skip the payload
         let args = vec!["alias".into(), "bad name=value".into()];
-        let (queue, _, _) = parse_arguments(&args);
 
-        // Depending on your 'is_valid_name' logic, this should
-        // either be an Invalid action or an empty queue.
-        assert!(queue.iter().any(|t| matches!(t.action, AliasAction::Invalid)));
+        // FIX: Swap the order so 'queue' is the TaskQueue (the first element)
+        // and 'voice' (or _) is the Verbosity (the second element).
+        let (queue, _voice) = parse_arguments(&args);
+
+        // Now 'queue' refers to the TaskQueue, which has the .tasks field
+        // or an iterator implementation.
+        assert!(queue.tasks.iter().any(|t| matches!(t.action, AliasAction::Invalid)));
     }
 
     #[test]
     fn test_parser_file_flag_missing_path() {
-        // Input: alias --file
-        // Hazard: What happens if there's no index + 1?
         let args = vec!["alias".into(), "--file".into()];
-        let (_queue, _voice, path) = parse_arguments(&args);
-        assert!(path.is_none(), "Should not crash when --file is naked at end of args");
+        let (mut queue, _voice) = parse_arguments(&args);
+
+        // The task itself might be empty or a 'Fail' action because the flag was fubar
+        let task = queue.pull().expect("Should have a task");
+
+        // BUT the queue should have resolved the context to the default
+        assert_eq!(task.path.to_string_lossy(), "", "Task path should be empty because --file was naked");
+        assert_eq!(queue.getpath(), get_alias_path("").unwrap().to_string_lossy(), "Queue should fall back to default");
     }
-}
 
-#[cfg(test)]
-mod battery_20 {
-    use alias_lib::parse_alias_line;
+    #[cfg(test)]
+    mod battery_20 {
+        use alias_lib::parse_alias_line;
 
-    #[test]
-    fn test_parse_alias_line_comprehensive() {
-        let cases = vec![
-            // 1. Simple case (Still works)
-            ("rust=cargo $*", Some(("rust", "cargo $*"))),
+        #[test]
+        fn test_parse_alias_line_comprehensive() {
+            let cases = vec![
+                // 1. Simple case (Still works)
+                ("rust=cargo $*", Some(("rust", "cargo $*"))),
 
-            // 2. Quoted LHS (FIXED: Now we EXPECT the quotes to stay)
-            ("\"my alias\"=echo hello", Some(("\"my alias\"", "echo hello"))),
+                // 2. Quoted LHS (FIXED: Now we EXPECT the quotes to stay)
+                ("\"my alias\"=echo hello", Some(("\"my alias\"", "echo hello"))),
 
-            // 3. The "XCD" (Still works, and now we know WHY it works)
-            ("xcd=cd /d \"%i\"", Some(("xcd", "cd /d \"%i\""))),
+                // 3. The "XCD" (Still works, and now we know WHY it works)
+                ("xcd=cd /d \"%i\"", Some(("xcd", "cd /d \"%i\""))),
 
-            // 4. Kanji (Still works)
-            ("エイリアス=echo kanji", Some(("エイリアス", "echo kanji"))),
+                // 4. Kanji (Still works)
+                ("エイリアス=echo kanji", Some(("エイリアス", "echo kanji"))),
 
-            // 5. Whitespace (Still works because we still .trim() whitespace, just not quotes)
-            ("  clean \u{00A0}=  value with space  ", Some(("clean", "value with space"))),
+                // 5. Whitespace (Still works because we still .trim() whitespace, just not quotes)
+                ("  clean \u{00A0}=  value with space  ", Some(("clean", "value with space"))),
 
-            // ...
+                // ...
 
-            // 10. Unbalanced LHS quote (FIXED: Expect the literal quote)
-            ("\"unbalanced=value", Some(("\"unbalanced", "value"))),
-        ];
-        for (input, expected) in cases {
-            let result = parse_alias_line(input);
+                // 10. Unbalanced LHS quote (FIXED: Expect the literal quote)
+                ("\"unbalanced=value", Some(("\"unbalanced", "value"))),
+            ];
+            for (input, expected) in cases {
+                let result = parse_alias_line(input);
 
-            match (result, expected) {
-                (Some((n, v)), Some((en, ev))) => {
-                    assert_eq!(n, en, "Name mismatch on input: {}", input);
-                    assert_eq!(v, ev, "Value mismatch on input: {}", input);
+                match (result, expected) {
+                    (Some((n, v)), Some((en, ev))) => {
+                        assert_eq!(n, en, "Name mismatch on input: {}", input);
+                        assert_eq!(v, ev, "Value mismatch on input: {}", input);
+                    }
+                    (None, None) => {} // Correctly failed
+                    (r, e) => panic!("Failed test case '{}'. Got {:?}, expected {:?}", input, r, e),
                 }
-                (None, None) => {} // Correctly failed
-                (r, e) => panic!("Failed test case '{}'. Got {:?}, expected {:?}", input, r, e),
             }
         }
     }
-}
 
-#[cfg(test)]
-mod intelligence_tests {
-    use super::*;
-    use std::fs::File;
-    use std::io::Write;
-    use tempfile::tempdir;
-    use alias_lib::{ext_with_dot, identify_binary, is_script_extension, peek_pe_metadata, BinarySubsystem};
+    #[cfg(test)]
+    mod intelligence_tests {
+//        use super::*;
+        use std::fs::File;
+        use std::io::Write;
+        use tempfile::tempdir;
+        use alias_lib::{ext_with_dot, identify_binary, is_script_extension, peek_pe_metadata, BinarySubsystem, Verbosity};
 
-    #[test]
-    fn test_ext_with_dot_normalization() {
-        assert_eq!(ext_with_dot(std::ffi::OsStr::new("exe")), ".exe");
-        assert_eq!(ext_with_dot(std::ffi::OsStr::new(".BAT")), ".bat"); // Case & Dot check
-        assert_eq!(ext_with_dot(std::ffi::OsStr::new("")), ".");
-    }
-
-    #[test]
-    fn test_is_script_extension() {
-        assert!(is_script_extension(".bat"));
-        assert!(is_script_extension(".cmd"));
-        assert!(is_script_extension(".vbs"));
-        assert!(!is_script_extension(".exe")); // Binary, not script
-        assert!(!is_script_extension(".txt")); // Text, not executable script
-    }
-
-    #[test]
-    fn test_identify_binary_script_triage() {
-        let dir = tempdir().unwrap();
-        let script_path = dir.path().join("test.bat");
-        File::create(&script_path).unwrap();
-
-        let verbosity = Verbosity::mute();
-        let profile = identify_binary(&verbosity, &script_path).unwrap();
-
-        assert!(matches!(profile.subsystem, BinarySubsystem::Script));
-        assert_eq!(profile.exe, script_path);
-    }
-
-    #[test]
-    fn test_peek_pe_metadata_invalid_files() {
-        let dir = tempdir().unwrap();
-        let txt_path = dir.path().join("fake.exe");
-        let mut f = File::create(&txt_path).unwrap();
-        f.write_all(b"Not an MZ header").unwrap();
-
-        // Should fail because it doesn't start with "MZ"
-        let result = peek_pe_metadata(&txt_path);
-        assert!(result.is_err());
-    }
-}
-
-#[cfg(test)]
-mod intent_tests {
-    use super::*;
-    use std::env;
-    use alias_lib::{find_executable, get_editor_preference};
-
-    #[test]
-    fn test_get_editor_preference_override() {
-        let verbosity = Verbosity::mute();
-        let override_cmd = Some("code --wait".to_string());
-
-        let profile = get_editor_preference(&verbosity, &override_cmd);
-
-        // Should split arguments correctly
-        assert_eq!(profile.args[0], "code");
-        assert_eq!(profile.args[1], "--wait");
-    }
-
-    #[test]
-    fn test_get_editor_preference_env_priority() {
-        let verbosity = Verbosity::mute();
-
-        // Set environment
-        unsafe {
-            env::set_var("VISUAL", "vim");
-            env::set_var("EDITOR", "nano");
+        #[test]
+        fn test_ext_with_dot_normalization() {
+            assert_eq!(ext_with_dot(std::ffi::OsStr::new("exe")), ".exe");
+            assert_eq!(ext_with_dot(std::ffi::OsStr::new(".BAT")), ".bat"); // Case & Dot check
+            assert_eq!(ext_with_dot(std::ffi::OsStr::new("")), ".");
         }
 
-        let profile = get_editor_preference(&verbosity, &None);
-
-        // VISUAL has priority over EDITOR
-        assert_eq!(profile.args[0], "vim");
-
-        unsafe {
-            env::remove_var("VISUAL");
+        #[test]
+        fn test_is_script_extension() {
+            assert!(is_script_extension(".bat"));
+            assert!(is_script_extension(".cmd"));
+            assert!(is_script_extension(".vbs"));
+            assert!(!is_script_extension(".exe")); // Binary, not script
+            assert!(!is_script_extension(".txt")); // Text, not executable script
         }
-        let profile_2 = get_editor_preference(&verbosity, &None);
-        assert_eq!(profile_2.args[0], "nano");
+
+        #[test]
+        fn test_identify_binary_script_triage() {
+            let dir = tempdir().unwrap();
+            let script_path = dir.path().join("test.bat");
+            File::create(&script_path).unwrap();
+
+            let verbosity = Verbosity::mute();
+            let profile = identify_binary(&verbosity, &script_path).unwrap();
+
+            assert!(matches!(profile.subsystem, BinarySubsystem::Script));
+            assert_eq!(profile.exe, script_path);
+        }
+
+        #[test]
+        fn test_peek_pe_metadata_invalid_files() {
+            let dir = tempdir().unwrap();
+            let txt_path = dir.path().join("fake.exe");
+            let mut f = File::create(&txt_path).unwrap();
+            f.write_all(b"Not an MZ header").unwrap();
+
+            // Should fail because it doesn't start with "MZ"
+            let result = peek_pe_metadata(&txt_path);
+            assert!(result.is_err());
+        }
     }
 
-    #[test]
-    fn test_find_executable_path_logic() {
-        // This test assumes 'notepad.exe' exists in C:\Windows\System32
-        // which is standard for Windows environments.
-        let result = find_executable("notepad");
-        assert!(result.is_some());
-        assert!(result.unwrap().to_string_lossy().to_lowercase().contains("notepad.exe"));
+    #[cfg(test)]
+    mod intent_tests {
+//        use super::*;
+        use std::env;
+        use alias_lib::{find_executable, get_editor_preference, Verbosity};
+
+        #[test]
+        fn test_get_editor_preference_override() {
+            let verbosity = Verbosity::mute();
+            let override_cmd = Some("code --wait".to_string());
+
+            let profile = get_editor_preference(&verbosity, &override_cmd);
+
+            // Should split arguments correctly
+            assert_eq!(profile.args[0], "code");
+            assert_eq!(profile.args[1], "--wait");
+        }
+
+        #[test]
+        fn test_get_editor_preference_env_priority() {
+            let verbosity = Verbosity::mute();
+
+            // Set environment
+            unsafe {
+                env::set_var("VISUAL", "vim");
+                env::set_var("EDITOR", "nano");
+            }
+
+            let profile = get_editor_preference(&verbosity, &None);
+
+            // VISUAL has priority over EDITOR
+            assert_eq!(profile.args[0], "vim");
+
+            unsafe {
+                env::remove_var("VISUAL");
+            }
+            let profile_2 = get_editor_preference(&verbosity, &None);
+            assert_eq!(profile_2.args[0], "nano");
+        }
+
+        #[test]
+        fn test_find_executable_path_logic() {
+            // This test assumes 'notepad.exe' exists in C:\Windows\System32
+            // which is standard for Windows environments.
+            let result = find_executable("notepad");
+            assert!(result.is_some());
+            assert!(result.unwrap().to_string_lossy().to_lowercase().contains("notepad.exe"));
+        }
     }
-}
 
-#[cfg(test)]
-mod integration_tests {
-    use super::*;
-    use std::path::PathBuf;
-    use alias_lib::{open_editor, BinaryProfile, BinarySubsystem};
+    #[cfg(test)]
+    mod integration_tests {
+//        use super::*;
+        use std::path::PathBuf;
+        use alias_lib::{open_editor, BinaryProfile, BinarySubsystem, Verbosity};
 
-    #[test]
-    fn test_open_editor_inaccessible_target() {
-        let verbosity = Verbosity::mute();
-        let non_existent = PathBuf::from("Z:\\this\\does\\not\\exist.txt");
+        #[test]
+        fn test_open_editor_inaccessible_target() {
+            let verbosity = Verbosity::mute();
+            let non_existent = PathBuf::from("Z:\\this\\does\\not\\exist.txt");
 
-        let result = open_editor(&non_existent, None, &verbosity);
+            let result = open_editor(&non_existent, None, &verbosity);
 
-        // Should return an error because the file doesn't exist
-        assert!(result.is_err());
-        assert_eq!(result.unwrap_err().to_string(), "Target file inaccessible.");
-    }
+            // Should return an error because the file doesn't exist
+            assert!(result.is_err());
+            assert_eq!(result.unwrap_err().to_string(), "Target file inaccessible.");
+        }
 
-    #[test]
-    fn test_binary_profile_fallback() {
-        let profile = BinaryProfile::fallback("dummy.exe");
-        assert_eq!(profile.exe, PathBuf::from("dummy.exe"));
-        assert!(matches!(profile.subsystem, BinarySubsystem::Cui));
-        assert_eq!(profile.is_32bit, false);
+        #[test]
+        fn test_binary_profile_fallback() {
+            let profile = BinaryProfile::fallback("dummy.exe");
+            assert_eq!(profile.exe, PathBuf::from("dummy.exe"));
+            assert!(matches!(profile.subsystem, BinarySubsystem::Cui));
+            assert_eq!(profile.is_32bit, false);
+        }
     }
 }
 

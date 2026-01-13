@@ -17,12 +17,15 @@ windows-sys = { version = "0.61.2", features = [
 assert_cmd = "2.1.1"
 predicates = "3.1.3"
 tempfile = "3.24.0"
+lazy_static = "1.5.0"
 
 
 [dev-dependencies]
 serial_test = "3.1.1"
 winreg = "0.52" # Or your current version
 alias_nuke = { path = "../alias_nuke" }
+ctor = "0.6.3"
+
 
 [features]
 test_utils = []

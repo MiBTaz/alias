@@ -8,6 +8,16 @@ use alias_lib::*;
 use alias_win32::{Win32LibraryInterface, REG_SUBKEY, REG_AUTORUN_KEY};
 extern crate alias_lib;
 
+#[cfg(test)]
+#[ctor::ctor]
+fn init() {
+    unsafe {
+        std::env::remove_var("ALIAS_FILE");
+        std::env::remove_var("ALIAS_OPTS");
+        std::env::remove_var("ALIAS_PATH");
+    }
+}
+
 pub fn get_test_path(suffix: &str) -> PathBuf {
     PathBuf::from(format!("test_{}_{:?}.doskey", suffix, std::thread::current().id()))
 }

@@ -6,6 +6,16 @@ use serial_test::serial;
 use alias_lib::ShowFeature::{self, On, Off};
 use alias_wrapper::WrapperLibraryInterface as P;
 
+#[cfg(test)]
+#[ctor::ctor]
+fn init() {
+    unsafe {
+        std::env::remove_var("ALIAS_FILE");
+        std::env::remove_var("ALIAS_OPTS");
+        std::env::remove_var("ALIAS_PATH");
+    }
+}
+
 #[test]
 #[serial]
 fn test_wrapper_strike_direct() {

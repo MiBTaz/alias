@@ -7,12 +7,22 @@ use std::io;
 use std::path::PathBuf;
 #[allow(unused_imports)]
 use serial_test::serial;
-extern crate alias_nuke;
 // This brings in the trait, the structs, and the macro
 #[allow(unused_imports)]
 use alias_lib::*;
 #[allow(unused_imports)]
 use alias_lib::{REG_SUBKEY, REG_AUTORUN_KEY};
+extern crate alias_nuke;
+
+#[cfg(test)]
+#[ctor::ctor]
+fn init() {
+    unsafe {
+        std::env::remove_var("ALIAS_FILE");
+        std::env::remove_var("ALIAS_OPTS");
+        std::env::remove_var("ALIAS_PATH");
+    }
+}
 
 macro_rules! skip_if_wrapper {
     () => {

@@ -8,10 +8,13 @@ edition = "2024"
 # This ensures alias_nuke is built before any lib tests run
 alias_nuke = { path = "../alias_nuke" }
 serial_test = "3.1.1"
+ctor = "0.6.3"
 
 [dependencies]
 tempfile = "3.24.0"
 shlex = "1.3.0"
+lazy_static = "1.5.0"
+serial_test = "3.2.0"
 
 
 [features]

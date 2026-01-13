@@ -10,6 +10,16 @@ use alias_lib::*;
 #[allow(unused_imports)]
 use alias_lib::ShowFeature;
 
+#[cfg(test)]
+#[ctor::ctor]
+fn init() {
+    unsafe {
+        std::env::remove_var("ALIAS_FILE");
+        std::env::remove_var("ALIAS_OPTS");
+        std::env::remove_var("ALIAS_PATH");
+    }
+}
+
 #[test]
 #[serial(console)]
 fn test_hybrid_volatile_bypass() {

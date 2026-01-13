@@ -19,6 +19,7 @@ tempfile = "3.24.0"
 [dev-dependencies]
 serial_test = "3.1.1"
 alias_nuke = { path = "../alias_nuke" }
+ctor = "0.6.3"
 
 
 [features]
