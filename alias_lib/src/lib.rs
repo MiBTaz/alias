@@ -159,6 +159,22 @@ macro_rules! setup_failure {
     };
 }
 
+#[macro_export]
+macro_rules! dispatch_failure {
+    ($verbosity:expr, $variant:expr, $msg:expr) => {{
+        let error_msg = $msg;
+        // Trace uses the Debug/Display of the variant
+        trace!("[dispatch] Logic Error: {} (Variant: {:?})", error_msg, $variant);
+
+        // Scream for the user
+        scream!($verbosity, AliasIcon::Fail, "Critical Error. Should be unreachable in dispatch: {}", error_msg);
+
+        // Return the error. We use ErrorCode::Generic because we can't
+        // cast a complex Enum to a u8, but we want the 'failure!' formatting.
+        return Err($crate::failure!($verbosity, $crate::ErrorCode::Generic, "{}", error_msg));
+    }};
+}
+
 // --- Shared Constants ---
 #[allow(dead_code)]
 const REG_CURRENT_USER: &str = "HKCU";
@@ -626,19 +642,28 @@ pub struct SetOptions {
 #[derive(Debug, PartialEq, Clone)]
 pub enum AliasAction {
     Clear,
-    File,
     Edit(Option<String>),
+    File,
     Fail,
+    Force,
     Help,
+    Icons,
+    NoIcons,
     Invalid,
     Reload,
     Set(SetOptions),
     Setup,
     ShowAll,
+    Startup,
+    Temp,
+    Tips,
+    NoTips,
     Query(String),
+    Quiet,
     Remove(String),
     Unalias(String),
     Which,
+    Toggle(Box<AliasAction>, bool),
 }
 impl AliasAction {
     pub fn to_cli_args(&self) -> String {
@@ -646,10 +671,13 @@ impl AliasAction {
             AliasAction::Clear => "--clear".to_string(),
             AliasAction::Edit(None) => "--edalias".to_string(),
             AliasAction::Edit(Some(editor)) => format!("--edalias=\"{}\"", editor),
-            AliasAction::Fail => {"".to_string()},
-            AliasAction::File => {"--file".to_string()},
-            AliasAction::Help => {"--help".to_string()},
-            AliasAction::Invalid => {"".to_string()},
+            AliasAction::Fail => { "".to_string() },
+            AliasAction::File => { "--file".to_string() },
+            AliasAction::Force => { "--force".to_string() },
+            AliasAction::Help => { "--help".to_string() },
+            AliasAction::Icons => { "--[no-]icons".to_string() },
+            AliasAction::NoIcons => { "".to_string() }
+            AliasAction::Invalid => { "".to_string() },
             AliasAction::Reload => "--reload".to_string(),
             AliasAction::Remove(name) => format!("--remove {}", name),
             AliasAction::Query(name) => name.clone(),
@@ -659,10 +687,16 @@ impl AliasAction {
                 if opts.force_case { s.push_str(" --force"); }
                 s
             }
-            AliasAction::Setup => {"--setup".to_string()},
-            AliasAction::ShowAll => {"".to_string()},
+            AliasAction::Setup => { "--setup".to_string() },
+            AliasAction::ShowAll => { "".to_string() },
             AliasAction::Unalias(name) => format!("--unalias {}", name),
             AliasAction::Which => "--which".to_string(),
+            AliasAction::Startup => { "--startup".to_string() },
+            AliasAction::Temp => { "--temp".to_string() },
+            AliasAction::Tips => { "--[no-]tips".to_string() },
+            AliasAction::NoTips => { "".to_string()}
+            AliasAction::Quiet => { "--quiet".to_string() },
+            AliasAction::Toggle(_, _) => {"".to_string()},
         }
     }
     pub fn requires_file(&self) -> bool {
@@ -698,13 +732,34 @@ impl FromStr for AliasAction {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         let low = s.to_lowercase();
 
-        // 1. Handle Key=Value Pairs (Set, Edit with path, Remove)
+        // 1. HIGH PRIORITY: The Internal Toggle (Check this BEFORE general split)
+        if low.starts_with("__internal_toggle=") {
+            if let Some((_, right)) = low.split_once('=') {
+                if let Some((name, state_str)) = right.split_once(':') {
+                    let state = state_str.parse::<bool>().unwrap_or(false);
+                    return Ok(Self::Toggle(
+                        Box::new(Self::Query(name.to_string())),
+                        state
+                    ));
+                }
+            }
+            return Ok(Self::Invalid);
+        }
+
+        // 2. Pre-process Negation
+        let (is_negated, search_term) = if let Some(stripped) = low.strip_prefix("--no-") {
+            (true, format!("--{}", stripped))
+        } else {
+            (false, low.clone())
+        };
+
+        // 3. Handle Key=Value Pairs
         if let Some((left, right)) = low.split_once('=') {
             return Ok(match left {
-                "--edalias" | "--edit" => Self::Edit(Some(right.trim_matches('"').to_string())),
-                "--remove"             => Self::Remove(right.to_string()),
-                "--unalias"            => Self::Unalias(right.to_string()),
-                // If no leading dash, it's a standard name=value assignment
+                "--edalias" | "--edaliases"     => Self::Edit(Some(right.trim_matches('"').to_string())),
+                "--remove"                      => Self::Remove(right.to_string()),
+                "--unalias"                     => Self::Unalias(right.to_string()),
+                // This was the "Black Hole" - it was catching __internal_toggle
                 _ if !left.starts_with('-') => Self::Set(SetOptions {
                     name: left.to_string(),
                     value: right.to_string(),
@@ -715,45 +770,64 @@ impl FromStr for AliasAction {
             });
         }
 
-        // 2. Handle Standalone Intent Flags
-        Ok(match low.as_str() {
-            "--help"   | "-h" | "/?" => Self::Help,
-            "--reload" | "-r"        => Self::Reload,
-            "--setup"                => Self::Setup,
-            "--clear"                => Self::Clear,
-            "--which"  | "--audit"   => Self::Which,
-            "--edalias"| "--edit"    => Self::Edit(None),
-            "--show"   | "--all"     => Self::ShowAll,
-            "--file"                 => Self::File,
-            // Match unrecognized double-dash flags as Invalid
+        // 4. Single Match Block for all Standalone Flags
+        Ok(match search_term.as_str() {
+            // Toggable Flags
+            "--icons" => if is_negated { Self::NoIcons } else { Self::Icons },
+            "--tips"  => if is_negated { Self::NoTips } else { Self::Tips },
+
+            // Standard Flags (Negation not supported/ignored)
+            "--help"                       => if is_negated { Self::Invalid } else { Self::Help },
+            "--reload"                     => if is_negated { Self::Invalid } else { Self::Reload },
+            "--setup"                      => if is_negated { Self::Invalid } else { Self::Setup },
+            "--startup"                    => if is_negated { Self::Invalid } else { Self::Startup },
+            "--clear"                      => if is_negated { Self::Invalid } else { Self::Clear },
+            "--which"                      => if is_negated { Self::Invalid } else { Self::Which },
+            "--edalias" | "--edaliases"    => if is_negated { Self::Invalid } else { Self::Edit(None) },
+            "--showall" | "--all"          => if is_negated { Self::Invalid } else { Self::ShowAll },
+            "--file"                       => if is_negated { Self::Invalid } else { Self::File },
+            "--quiet"                      => if is_negated { Self::Invalid } else { Self::Quiet },
+            "--temp"                       => if is_negated { Self::Invalid } else { Self::Temp },
+            "--force"                      => if is_negated { Self::Invalid } else { Self::Force },
+            "--unalias"                    => if is_negated { Self::Invalid } else { Self::Unalias(String::new()) },
+            "--remove"                     => if is_negated { Self::Invalid } else { Self::Remove(String::new()) },
+
+            // Catch-alls
             _ if low.starts_with("--") => Self::Invalid,
-            // Everything else is a search query for an alias name
-            _ => Self::Query(s.to_string()),
+            _                              => Self::Query(s.to_string()),
         })
     }
 }
 impl fmt::Display for AliasAction {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Help     => write!(f, "--help"),
-            Self::Reload   => write!(f, "--reload"),
-            Self::Setup    => write!(f, "--setup"),
-            Self::Clear    => write!(f, "--clear"),
-            Self::Which    => write!(f, "--which"),
-            Self::ShowAll  => write!(f, "--all"),
-            Self::File     => write!(f, "--file"),
+            Self::Help                   => write!(f, "--help"),
+            Self::Reload                 => write!(f, "--reload"),
+            Self::Setup                  => write!(f, "--setup"),
+            Self::Clear                  => write!(f, "--clear"),
+            Self::Which                  => write!(f, "--which"),
+            Self::ShowAll                => write!(f, "--all"),
+            Self::File                   => write!(f, "--file"),
             Self::Edit(Some(ed)) => write!(f, "--edalias={}", ed),
-            Self::Edit(None)     => write!(f, "--edalias"),
+            Self::Edit(None)             => write!(f, "--edalias"),
             Self::Remove(t)      => write!(f, "--remove={}", t),
             Self::Unalias(t)     => write!(f, "--unalias={}", t),
-            Self::Set(opt)       => write!(f, "{}={}", opt.name, opt.value),
+            Self::Set(opt)   => write!(f, "{}={}", opt.name, opt.value),
             Self::Query(q)       => write!(f, "{}", q),
-            Self::Invalid        => write!(f, "--invalid"),
-            Self::Fail           => write!(f, "--fail"),
+            Self::Invalid                => write!(f, "--invalid"),
+            Self::Fail                   => write!(f, "--fail"),
+            Self::Force                 => write!(f, "--force"),
+            Self::Startup               => write!(f, "--startup"),
+            Self::Temp                  => write!(f, "--temp"),
+            Self::Quiet                 => write!(f, "--quiet"),
+            Self::Icons                 => write!(f, "--icons"),
+            Self::NoIcons               => write!(f, "--no-icons"),
+            Self::Tips                  => write!(f, "--tips"),
+            Self::NoTips                => write!(f, "--no-tips"),
+            Self::Toggle(from, to) => write!(f, "__internal_toggle={}:{}", from, to),
         }
     }
 }
-
 impl AliasAction {
     pub fn error (&self) -> AliasErrorString<'_> { AliasErrorString(self) }
 }
@@ -771,14 +845,23 @@ impl<'a> std::fmt::Display for AliasErrorString<'a> {
             AliasAction::File => write!(f, "Error loading file for actions or load"),
             AliasAction::Help => write!(f, "Display help"),
             AliasAction::Invalid => write!(f, "Unrecognized or malformed command"),
+            AliasAction::Icons => write!(f, "Error setting icons"),
+            AliasAction::NoIcons => write!(f, "Error unsetting icons"),
             AliasAction::Query(name) => write!(f, "Error querying alias {}: ", name),
             AliasAction::Reload => write!(f, "Error reloading configuration"),
             AliasAction::Remove(name) => write!(f, "Error removing alias: {}", name),
             AliasAction::Set(opts) => write!(f, "Error setting alias: {}", opts.name),
             AliasAction::Setup => write!(f, "Error setting up autorun registry entry"),
             AliasAction::ShowAll => write!(f, "Error showing all aliases"),
+            AliasAction::Tips => write!(f, "Error setting tips"),
+            AliasAction::NoTips => write!(f, "Error unsetting tips"),
             AliasAction::Unalias(alias) => write!(f, "Error unaliasing alias: {}", alias),
             AliasAction::Which => write!(f, "Error running diagnostics"),
+            AliasAction::Force => write!(f, "Error setting/using force case"),
+            AliasAction::Startup => write!(f, "Error setting/using statup mode"),
+            AliasAction::Temp => write!(f, "Error setting/using process as memory only"),
+            AliasAction::Quiet => write!(f, "Error setting/using quiet mode"),
+            AliasAction::Toggle(from, to) => write!(f, "Error reverse mapping {} to {}", from, to),
         }
     }
 }
@@ -1110,41 +1193,50 @@ pub fn parse_arguments(args: &[String]) -> (TaskQueue, Verbosity) {
             skip_next = false;
             continue;
         }
+
+        // 1. Keep the Bridge check first
         if arg == "--" {
             if voice.in_setup { setup_failure!(voice, queue, arg); }
             is_literal = true;
-            pivot_index = i + 1; // Everything after this is payload
-            break;               // Stop looking for flags immediately
+            pivot_index = i + 1;
+            break;
         }
 
-        let low_arg = arg.to_lowercase();
-        match low_arg.as_str() {
-            // the punch out
-            "--help" => {
+        // 2. The Semantic Trigger
+        let trigger = AliasAction::intent(arg);
+        match trigger {
+            // Punch-out Intent
+            AliasAction::Help => {
                 queue.clear();
                 queue.push(AliasAction::Help);
                 return (queue, voice);
             }
-            // Configs
-            "--startup" => {
+            // Setup Intent
+            AliasAction::Setup => {
+                voice.in_setup = true;
+                if !queue.is_empty() {
+                    setup_failure!(voice, queue, "Error: --setup must be the first command.", arg);
+                }
+                queue.push(AliasAction::Setup);
+                continue;
+            }
+            // Modifiers (These don't push to queue, just change local state)
+            // You'll need to add "Quiet", "Temp", "Force", and "Startup" to your enum
+            AliasAction::Icons   => { voice.show_icons = ShowFeature::On; continue; },
+            AliasAction::NoIcons => { voice.show_icons = ShowFeature::Off; continue; },
+            AliasAction::Tips => { voice.show_icons = ShowFeature::On; continue; },
+            AliasAction::NoTips  => { voice.show_tips = ShowTips::Off; continue; },
+            AliasAction::Quiet => { voice.level = VerbosityLevel::Silent; voice.show_icons = ShowFeature::Off; continue; },
+            AliasAction::Temp => { volatile = true; continue; },
+            AliasAction::Force => { force_case = true; continue; },
+            AliasAction::Startup => {
                 if voice.in_setup { setup_failure!(voice, queue, arg); }
                 voice = voice!(Mute, Off, Off);
                 voice.in_startup = true;
+                continue;
             }
-            "--quiet" => {
-                voice.level = VerbosityLevel::Silent;
-                voice.show_icons = ShowFeature::Off;
-            }
-            "--temp" => volatile = true,
-            "--force" => force_case = true,
-            "--tips" => {
-                voice.show_tips = ShowTips::On;
-                voice.display_tip = Some(get_random_tip());
-            },
-            "--no-tips" => voice.show_tips = ShowTips::Off,
-            "--icons" => voice.show_icons = ShowFeature::On,
-            "--no-icons" => voice.show_icons = ShowFeature::Off,
-            "--file" => {
+            // The Consuming Intent (Triggers your existing logic)
+            AliasAction::File => {
                 let mut invalidate = false;
                 if let Some(path_str) = args.get(i + 1) {
                     // semaphore. always set. never blindly use.
@@ -1177,72 +1269,63 @@ pub fn parse_arguments(args: &[String]) -> (TaskQueue, Verbosity) {
                     scream!(voice, AliasIcon::Alert, "--file requires a path");
                     pivot_index = i + 1;
                 }
+                continue;
             }
-            // Actions
-            // Inside Step 1 match block
-            "--edalias" | "--edaliases" => {
+            AliasAction::Unalias(_) | AliasAction::Remove(_) => {
                 if voice.in_setup { setup_failure!(voice, queue, arg); }
-                let editor = arg.split_once('=').map(|(_, ed)| ed.to_string());
-                queue.push(AliasAction::Edit(editor));
                 pivot_index = i + 1;
-            }
-            // Pattern match edalias=<editor>
-            s if s.starts_with("--edalias=") || s.starts_with("--edaliases=") => {
-                if voice.in_setup { setup_failure!(voice, queue, arg); }
-                let val = s.split_once('=').map(|(_, v)| v.to_string());
-                queue.push(AliasAction::Edit(val));
-            }
-            "--clear" => queue.push(AliasAction::Clear),
-            "--setup" => {
-                voice.in_setup = true;
-                if !queue.is_empty() { setup_failure!(voice, queue, "Error: --setup must be the first command.", arg); }
-                queue.push(AliasAction::Setup);
-            }
-            "--reload" => {
-                queue.push(AliasAction::Reload);
-                pivot_index = i + 1;
-            }
-            "--which" => {
-                queue.push(AliasAction::Which);
-                pivot_index = i + 1;
-            }
-            "--unalias" | "--remove" => {
-                if voice.in_setup { setup_failure!(voice, queue, arg); }
-                if let Some(target) = args.get(i + 1) {
-                    // STEEL: No splitting, no validation.
-                    // We take the literal arg (e.g., "stupid=me") and pass it.
-                    let target_name = target.trim();
+                if let Some(next) = args.get(pivot_index) {
+                    let next_intent = AliasAction::intent(next);
 
-                    let action = if low_arg == "--remove" {
-                        AliasAction::Remove(target_name.to_string())
-                    } else {
-                        AliasAction::Unalias(target_name.to_string())
-                    };
-
-                    queue.push(action);
-                    skip_next = true;
-                    pivot_index = i + 2;
+                    // If the next thing is just a Query (a name), we harvest it
+                    if matches!(next_intent, AliasAction::Query(_)) && is_valid_name(next) {
+                        let harvested = if matches!(trigger, AliasAction::Unalias(_)) {
+                            AliasAction::Unalias(next.to_string())
+                        } else {
+                            AliasAction::Remove(next.to_string())
+                        };
+                        queue.push(harvested);
+                        skip_next = true;
+                        pivot_index = i + 2;
+                        continue;
+                    }
                 }
+                scream!(voice, AliasIcon::Alert, "{} requires a valid target", arg);
+                queue.push(AliasAction::Fail);
+                continue;
+            },
+            // Task-generating Intents
+            AliasAction::Reload => { queue.push(AliasAction::Reload); pivot_index = i + 1; continue;},
+            AliasAction::Which => { queue.push(AliasAction::Which); pivot_index = i + 1; continue;},
+            AliasAction::Clear => { queue.push(AliasAction::Clear); continue;},
+            // Use the data captured by intent() for parameterized flags
+            AliasAction::Edit(val) => {
+                if voice.in_setup { setup_failure!(voice, queue, arg); }
+                queue.push(AliasAction::Edit(val));
+                pivot_index = i + 1;
+                continue;
             }
-            // THE PIVOT BRANCH
             _ => {
                 if voice.in_setup { setup_failure!(voice, queue, arg); }
-                if arg.starts_with("--") {
+
+                // If intent() marked it Invalid but it starts with --, it's a bad flag
+                if matches!(trigger, AliasAction::Invalid) && arg.starts_with("--") {
                     scream!(voice, AliasIcon::Alert, "Unknown option: {}", arg);
-                    saw_unknown = true; // Mark it, but don't push yet
+                    saw_unknown = true;
                     pivot_index = i + 1;
                     queue.push_file(AliasAction::Invalid, PathBuf::from(""));
                     continue;
-                }                // If it's a naked string, check if it's the start of a Set or Query
+                }
+
+                // Otherwise, check if it's the start of the payload
                 let potential_name = arg.split('=').next().unwrap_or(arg);
                 if is_valid_name(potential_name) {
                     pivot_index = i;
-                    break; // PIVOT: Hand control to Step 2
+                    break; // PIVOT: Step 2
                 } else {
                     scream!(voice, AliasIcon::Alert, "Illegal command start: '{}'", arg);
                     queue.push(AliasAction::Invalid);
                     pivot_index = i + 1;
-                    continue;
                 }
             }
         }
@@ -1400,6 +1483,7 @@ pub fn parse_set_argument(
 }
 // --- Dipatcher, does what you think
 // Matches on AliasAction and executes the specific command strategy.
+#[named]
 pub fn dispatch<P: AliasProvider>(task: Task, verbosity: &Verbosity, ) -> Result<(), Box<dyn std::error::Error>> {
     // Convenience reference to the baked-in path
     let path = &task.path;
@@ -1493,6 +1577,15 @@ pub fn dispatch<P: AliasProvider>(task: Task, verbosity: &Verbosity, ) -> Result
             scream!(verbosity, AliasIcon::Alert, "Invalid command state.");
             print_help(verbosity, HelpMode::Short, Some(path));
         }
+        AliasAction::Force => {dispatch_failure!(verbosity, AliasAction::Force, "Metadata Leak: Parser state variant reached the executor.");}
+        AliasAction::Startup => {dispatch_failure!(verbosity, AliasAction::Startup, "Metadata Leak: Parser state variant reached the executor.");}
+        AliasAction::Temp => {dispatch_failure!(verbosity, AliasAction::Temp, "Metadata Leak: Parser state variant reached the executor.");}
+        AliasAction::Quiet => {dispatch_failure!(verbosity, AliasAction::Quiet, "Metadata Leak: Parser state variant reached the executor.");}
+        AliasAction::Icons => {dispatch_failure!(verbosity, AliasAction::Quiet, "Metadata Leak: Parser state variant reached the executor.");}
+        AliasAction::NoIcons => {dispatch_failure!(verbosity, AliasAction::Quiet, "Metadata Leak: Parser state variant reached the executor.");}
+        AliasAction::Tips => {dispatch_failure!(verbosity, AliasAction::Quiet, "Metadata Leak: Parser state variant reached the executor.");}
+        AliasAction::NoTips => {dispatch_failure!(verbosity, AliasAction::Quiet, "Metadata Leak: Parser state variant reached the executor.");}
+        AliasAction::Toggle(_, _) => {dispatch_failure!(verbosity, AliasAction::Quiet, "Metadata Leak: Parser state variant reached the executor.");}
     }
     Ok(())
 }

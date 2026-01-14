@@ -1872,7 +1872,6 @@ mod battery_18 {
     }
 }
 
-
 #[cfg(test)]
 mod battery_19 {
     use alias_lib::{get_alias_path, parse_arguments, AliasAction, VerbosityLevel};
@@ -2121,3 +2120,189 @@ mod battery_19 {
     }
 }
 
+#[cfg(test)]
+mod intent_and_symmetry_tests {
+    use std::str::FromStr;
+    use alias_lib::{is_valid_name, AliasAction};
+
+    #[test]
+    fn test_alias_action_symmetry_round_trip() {
+        let cases = vec![
+            AliasAction::Icons,
+            AliasAction::NoIcons,
+            AliasAction::Tips,
+            AliasAction::NoTips,
+            AliasAction::Help,
+            AliasAction::Reload,
+            AliasAction::Setup,
+            AliasAction::Clear,
+            AliasAction::Which,
+            AliasAction::File,
+            AliasAction::Quiet,
+            AliasAction::Temp,
+            AliasAction::Force,
+            AliasAction::Startup,
+            AliasAction::ShowAll,
+            AliasAction::Edit(Some("my_alias".to_string())),
+            AliasAction::Edit(None),
+            AliasAction::Unalias("target".to_string()),
+            AliasAction::Remove("old_cmd".to_string()),
+            AliasAction::Query("find_me".to_string()),
+            AliasAction::Toggle(Box::new(AliasAction::Query("icons".to_string())), true),
+        ];
+
+        for action in cases {
+            let serialized = action.to_string();
+            let deserialized = AliasAction::from_str(&serialized).expect("Round trip failed to parse");
+            assert_eq!(action, deserialized, "Symmetry break: {:?} != {:?}", action, deserialized);
+        }
+    }
+
+    #[test]
+    fn test_semantic_intent_categorization() {
+        let test_matrix = vec![
+            // Input string      // Expected Variant type
+            ("--help", "Help"),
+            ("--HELP", "Help"), // Case-insensitivity check
+            ("--no-icons", "NoIcons"),
+            ("--unalias", "Unalias"),
+            ("my-alias", "Query"), // Standard name
+            ("complex_name", "Query"),
+            ("--unknown-flag", "Invalid"),
+            ("--no-help", "Invalid"), // Negating a non-toggleable flag
+        ];
+
+        for (input, expected_type) in test_matrix {
+            let intent = AliasAction::intent(input);
+            match expected_type {
+                "Help" => assert!(matches!(intent, AliasAction::Help)),
+                "NoIcons" => assert!(matches!(intent, AliasAction::NoIcons)),
+                "Unalias" => assert!(matches!(intent, AliasAction::Unalias(_))),
+                "Query" => assert!(matches!(intent, AliasAction::Query(_))),
+                "Invalid" => assert!(matches!(intent, AliasAction::Invalid)),
+                _ => panic!("Unknown expected type"),
+            }
+        }
+    }
+
+    #[test]
+    fn test_alias_validation_and_toggle_edges() {
+        // 1. Internal Toggle Parsing (The colon-split logic)
+        let toggle_str = "__internal_toggle=feature_x:true";
+        let action = AliasAction::from_str(toggle_str).unwrap();
+        if let AliasAction::Toggle(inner, state) = action {
+            assert_eq!(state, true);
+            if let AliasAction::Query(name) = *inner {
+                assert_eq!(name, "feature_x");
+            } else {
+                panic!("Toggle inner should be a Query");
+            }
+        }
+
+        // 2. Bad Toggle formats
+        assert!(matches!(AliasAction::from_str("__internal_toggle=no_colon"), Ok(AliasAction::Invalid)));
+
+        // 3. Name Validation (Gatekeeper)
+        assert!(is_valid_name("valid_name"));
+        assert!(is_valid_name("name-with-hyphen"));
+        assert!(!is_valid_name(""), "Empty name should be invalid");
+        assert!(!is_valid_name("name with spaces"), "Spaces should be invalid");
+        assert!(!is_valid_name("=leading_eq"), "Equals sign is a reserved delimiter");
+    }
+
+    #[test]
+    fn test_structural_traits() {
+        let a = AliasAction::Query("test".to_string());
+        let b = a.clone();
+        assert_eq!(a, b); // Partial_Eq check
+
+        // Ensure nested Boxes are also cloned correctly
+        let t1 = AliasAction::Toggle(Box::new(a), true);
+        let t2 = t1.clone();
+        assert_eq!(t1, t2);
+    }
+
+    #[test]
+    fn test_alias_action_symmetry_matrix() {
+        let scenarios = vec![
+            // Simple flags
+            AliasAction::Help,
+            AliasAction::Setup,
+            AliasAction::Reload,
+            // Parameterized
+            AliasAction::Unalias("test_cmd".to_string()),
+            AliasAction::Remove("garbage_collect".to_string()),
+            AliasAction::Edit(Some("vim_profile".to_string())),
+            AliasAction::Edit(None),
+            // Internal/Logic
+            AliasAction::Toggle(Box::new(AliasAction::Query("voice".to_string())), true),
+            AliasAction::Toggle(Box::new(AliasAction::Query("icons".to_string())), false),
+            AliasAction::Query("search_term".to_string()),
+        ];
+
+        for action in scenarios {
+            let serialized = action.to_string();
+            let deserialized = AliasAction::from_str(&serialized)
+                .expect(&format!("Failed to parse serialized action: {}", serialized));
+
+            assert_eq!(action, deserialized, "Mismatch after round-trip! \nOriginal: {:?} \nSerialized: {} \nResult: {:?}", action, serialized, deserialized);
+        }
+    }
+
+    #[test]
+    fn test_intent_categorization_and_negation_safety() {
+        let matrix = vec![
+            // Input string            // Expected Variant
+            ("--icons",                AliasAction::Icons),
+            ("--no-icons",             AliasAction::NoIcons),
+            ("--tips",                 AliasAction::Tips),
+            ("--no-tips",              AliasAction::NoTips),
+            // Verification: Do not strip "no-" from valid command names
+            ("no-limit",               AliasAction::Query("no-limit".to_string())),
+            ("--no-help",              AliasAction::Invalid), // Help can't be negated
+            ("--unalias",              AliasAction::Unalias(String::new())),
+        ];
+
+        for (input, expected) in matrix {
+            let result = AliasAction::intent(input);
+            // We check discriminant match since data inside Query/Unalias might vary
+            assert_eq!(std::mem::discriminant(&result), std::mem::discriminant(&expected),
+                       "Intent mismatch for input: {}", input);
+        }
+    }
+
+    #[test]
+    fn test_internal_toggle_parsing_integrity() {
+        let valid_toggle = "__internal_toggle=icons:true";
+        let action = AliasAction::from_str(valid_toggle).unwrap();
+
+        if let AliasAction::Toggle(inner, state) = action {
+            assert!(state == true);
+            if let AliasAction::Query(name) = *inner {
+                assert_eq!(name, "icons");
+            } else {
+                panic!("Toggle inner should have been a Query variant");
+            }
+        } else {
+            panic!("Failed to parse as Toggle variant");
+        }
+
+        // Negative case: Missing colon
+        let bad_toggle = "__internal_toggle=icons_true";
+        assert!(matches!(AliasAction::from_str(bad_toggle), Ok(AliasAction::Invalid)));
+    }
+
+    #[test]
+    fn test_alias_name_gatekeeper_edges() {
+        let valid = ["git-commit", "build_22", "test123", "normal"];
+        let invalid = ["CON", "PRN", "AUX", "name with space", "cmd=val", ""];
+
+        for name in valid {
+            assert!(is_valid_name(name), "Should be valid: {}", name);
+        }
+
+        for name in invalid {
+            assert!(!is_valid_name(name), "Should be invalid: {}", name);
+        }
+    }
+}
