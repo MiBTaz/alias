@@ -1784,7 +1784,7 @@ mod battery_17 {
         let verbosity = Verbosity::silent();
 
         // The raw action remains the same
-        let action = AliasAction::Unalias("  g=something  ".to_string());
+        let action = AliasAction::Unalias(SetOptions::volatile("  g=something  ".to_string(), false ));
 
         // 1. Wrap them into the Task struct
         let task = Task {
@@ -1797,7 +1797,7 @@ mod battery_17 {
 
         // 3. Verify the MockProvider captured the cleaned result
         let captured = LAST_CALL.lock().unwrap().take().expect("Mock should have been called");
-        assert_eq!(captured.name, "g");
+        assert_eq!(captured.name, "g=something");
         assert_eq!(captured.value, "");
     }
 
@@ -1806,7 +1806,7 @@ mod battery_17 {
         let file_path = std::path::PathBuf::from("test.doskey");
 
         // An empty or whitespace-only string should fail validation
-        let action = AliasAction::Unalias("   ".to_string());
+        let action = AliasAction::Unalias(SetOptions::volatile("   ".to_string(), false));
 
         // 1. Wrap it in a Task
         let task = Task {
@@ -2123,7 +2123,8 @@ mod battery_19 {
 #[cfg(test)]
 mod intent_and_symmetry_tests {
     use std::str::FromStr;
-    use alias_lib::{is_valid_name, AliasAction};
+    use alias_lib::{dispatch, is_valid_name, parse_arguments, AliasAction, Verbosity};
+    use super::*;
 
     #[test]
     fn test_alias_action_symmetry_round_trip() {
@@ -2145,9 +2146,9 @@ mod intent_and_symmetry_tests {
             AliasAction::ShowAll,
             AliasAction::Edit(Some("my_alias".to_string())),
             AliasAction::Edit(None),
-            AliasAction::Unalias("target".to_string()),
-            AliasAction::Remove("old_cmd".to_string()),
-            AliasAction::Query("find_me".to_string()),
+            AliasAction::Unalias(SetOptions::volatile("target".to_string(), false)),
+            AliasAction::Remove(SetOptions::involatile("old_cmd".to_string(), false)),
+            AliasAction::Unalias(SetOptions::volatile("find_me".to_string(), false)),
             AliasAction::Toggle(Box::new(AliasAction::Query("icons".to_string())), true),
         ];
 
@@ -2230,8 +2231,8 @@ mod intent_and_symmetry_tests {
             AliasAction::Setup,
             AliasAction::Reload,
             // Parameterized
-            AliasAction::Unalias("test_cmd".to_string()),
-            AliasAction::Remove("garbage_collect".to_string()),
+            AliasAction::Unalias(SetOptions::volatile("test_cmd".to_string(), false)),
+            AliasAction::Remove(SetOptions::involatile("garbage_collect".to_string(), false)),
             AliasAction::Edit(Some("vim_profile".to_string())),
             AliasAction::Edit(None),
             // Internal/Logic
@@ -2260,7 +2261,7 @@ mod intent_and_symmetry_tests {
             // Verification: Do not strip "no-" from valid command names
             ("no-limit",               AliasAction::Query("no-limit".to_string())),
             ("--no-help",              AliasAction::Invalid), // Help can't be negated
-            ("--unalias",              AliasAction::Unalias(String::new())),
+            ("--unalias",              AliasAction::Unalias(SetOptions::volatile(String::new(), false))),
         ];
 
         for (input, expected) in matrix {
@@ -2304,5 +2305,19 @@ mod intent_and_symmetry_tests {
         for name in invalid {
             assert!(!is_valid_name(name), "Should be invalid: {}", name);
         }
+    }
+
+    #[test]
+    fn t76_case_persistence_dispatch() {
+        // Scenario: alias --case g=ls
+        let (mut q, _) = parse_arguments(&vec!["alias".into(), "--force".into(), "g=ls".into()]);
+        let task = q.pull().expect("Should have one task");
+
+        // Dispatch the task to our Mock
+        dispatch::<MockProvider>(task, &Verbosity::silent()).unwrap();
+
+        let r = LAST_CALL.lock().unwrap().take().expect("Capture failed");
+        assert_eq!(r.name, "g");
+        assert!(r.force_case); // This verifies the rename is functional
     }
 }

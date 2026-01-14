@@ -235,13 +235,13 @@ pub struct Task {
 }
 pub struct TaskQueue {
     pub tasks: Vec<Task>,
-    action_path: String,
+    action_path: PathBuf,
 }
 impl TaskQueue {
     pub fn new() -> Self {
         Self {
             tasks: Vec::with_capacity(4),
-            action_path: "".to_string(),
+            action_path: PathBuf::new(),
         }
     }
     pub fn push_file(&mut self, action: AliasAction, path: PathBuf) {
@@ -251,10 +251,10 @@ impl TaskQueue {
         self.push_file(action, PathBuf::new());
     }
     pub fn pushpath(&mut self, path: String) {
-        self.action_path = path.clone();
+        self.action_path = PathBuf::from(path);
     }
-    pub fn getpath(&mut self) -> String {
-        self.action_path.clone()
+    pub fn getpath(&self) -> &str {
+        self.action_path.to_str().unwrap_or_default()
     }
     pub fn clear(&mut self) {
         self.tasks.clear();
@@ -581,11 +581,12 @@ impl std::fmt::Debug for Verbosity {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default)]
 #[repr(usize)]
 pub enum VerbosityLevel {
     Mute = 0,   // Total silence
     Silent = 1, // Whisper/Data only
+    #[default]
     Normal = 2, // Standard use
     Loud = 3,   // Audit/Verbose
 }
@@ -631,12 +632,55 @@ impl ShowTips {
 pub type ShowIcons = ShowFeature;
 pub type DisplayTip  = ShowFeature;
 
-#[derive(Debug, PartialEq, Clone)]
+#[derive(Debug, PartialEq, Clone, Default)]
 pub struct SetOptions {
     pub name: String,
     pub value: String,
     pub volatile: bool,
     pub force_case: bool,
+}
+impl SetOptions {
+    pub fn empty(is_volatile: bool) -> Self {
+        Self {
+            name: String::new(),
+            value: String::new(),
+            volatile: is_volatile,
+            force_case: false,
+        }
+    }
+
+    pub fn involatile(aname: String, case: bool) -> Self {
+        Self {
+            name: aname,
+            value: String::new(),
+            volatile: false,
+            force_case: case
+        }
+    }
+
+    pub fn volatile(aname: String, case: bool) -> Self {
+        Self {
+            name: aname,
+            value: String::new(),
+            volatile: true,
+            force_case: case,
+        }
+    }
+}
+impl From<&str> for SetOptions {
+    fn from(s: &str) -> Self {
+        Self {
+            name: s.to_string(),
+            value: String::new(),
+            volatile: true,
+            force_case: false,
+        }
+    }
+}
+impl From<String> for SetOptions {
+    fn from(s: String) -> Self {
+        Self::from(s.as_str())
+    }
 }
 
 #[derive(Debug, PartialEq, Clone)]
@@ -646,6 +690,7 @@ pub enum AliasAction {
     File,
     Fail,
     Force,
+    NoForce,
     Help,
     Icons,
     NoIcons,
@@ -660,45 +705,60 @@ pub enum AliasAction {
     NoTips,
     Query(String),
     Quiet,
-    Remove(String),
-    Unalias(String),
+    NoQuiet,
+    Remove(SetOptions),
+    Unalias(SetOptions),
     Which,
     Toggle(Box<AliasAction>, bool),
 }
 impl AliasAction {
     pub fn to_cli_args(&self) -> String {
         match self {
-            AliasAction::Clear => "--clear".to_string(),
-            AliasAction::Edit(None) => "--edalias".to_string(),
+            AliasAction::Clear             => "--clear".to_string(),
+            AliasAction::Edit(None)        => "--edalias".to_string(),
             AliasAction::Edit(Some(editor)) => format!("--edalias=\"{}\"", editor),
-            AliasAction::Fail => { "".to_string() },
-            AliasAction::File => { "--file".to_string() },
-            AliasAction::Force => { "--force".to_string() },
-            AliasAction::Help => { "--help".to_string() },
-            AliasAction::Icons => { "--[no-]icons".to_string() },
-            AliasAction::NoIcons => { "".to_string() }
-            AliasAction::Invalid => { "".to_string() },
-            AliasAction::Reload => "--reload".to_string(),
-            AliasAction::Remove(name) => format!("--remove {}", name),
-            AliasAction::Query(name) => name.clone(),
+            AliasAction::File              => "--file".to_string(),
+            AliasAction::Help              => "--help".to_string(),
+            AliasAction::Reload            => "--reload".to_string(),
+            AliasAction::Setup             => "--setup".to_string(),
+            AliasAction::Which             => "--which".to_string(),
+            AliasAction::Startup           => "--startup".to_string(),
+            AliasAction::Temp              => "--temp".to_string(),
+
+            // --- The Symmetric Toggles ---
+            AliasAction::Force             => "--force".to_string(),
+            AliasAction::NoForce           => "--no-force".to_string(),
+            AliasAction::Quiet             => "--quiet".to_string(),
+            AliasAction::NoQuiet           => "--no-quiet".to_string(),
+            AliasAction::Icons             => "--icons".to_string(),
+            AliasAction::NoIcons           => "--no-icons".to_string(),
+            AliasAction::Tips              => "--tips".to_string(),
+            AliasAction::NoTips            => "--no-tips".to_string(),
+
+            // --- Data-Carrying Variants ---
+            AliasAction::Remove(opts) => {
+                if opts.name.is_empty() { "--remove".to_string() }
+                else { format!("--remove {}", opts.name) }
+            },
+            AliasAction::Unalias(opts) => {
+                if opts.name.is_empty() { "--unalias".to_string() }
+                else { format!("--unalias {}", opts.name) }
+            },
+            AliasAction::Query(name)       => name.clone(),
             AliasAction::Set(opts) => {
                 let mut s = format!("{}={}", opts.name, opts.value);
                 if opts.volatile { s.push_str(" --temp"); }
                 if opts.force_case { s.push_str(" --force"); }
                 s
             }
-            AliasAction::Setup => { "--setup".to_string() },
-            AliasAction::ShowAll => { "".to_string() },
-            AliasAction::Unalias(name) => format!("--unalias {}", name),
-            AliasAction::Which => "--which".to_string(),
-            AliasAction::Startup => { "--startup".to_string() },
-            AliasAction::Temp => { "--temp".to_string() },
-            AliasAction::Tips => { "--[no-]tips".to_string() },
-            AliasAction::NoTips => { "".to_string()}
-            AliasAction::Quiet => { "--quiet".to_string() },
-            AliasAction::Toggle(_, _) => {"".to_string()},
+            // --- Internal/UI Only (Return empty or specific marker) ---
+            AliasAction::ShowAll           => "".to_string(),
+            AliasAction::Invalid           => "".to_string(),
+            AliasAction::Fail              => "".to_string(),
+            AliasAction::Toggle(from, to)  => format!("__internal_toggle={}:{}", from, to),
         }
     }
+
     pub fn requires_file(&self) -> bool {
         match self {
             | AliasAction::Edit(_)
@@ -727,12 +787,16 @@ impl AliasAction {
     }
 }
 impl FromStr for AliasAction {
-    type Err = (); // We use AliasAction::Invalid instead of hard errors
+    type Err = ();
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
+        // 1. Tokenize the input immediately to solve E0425
+        let parts: Vec<&str> = s.split_whitespace().collect();
+        if parts.is_empty() { return Ok(Self::Invalid); }
+
         let low = s.to_lowercase();
 
-        // 1. HIGH PRIORITY: The Internal Toggle (Check this BEFORE general split)
+        // 2. HIGH PRIORITY: The Internal Toggle (Unchanged)
         if low.starts_with("__internal_toggle=") {
             if let Some((_, right)) = low.split_once('=') {
                 if let Some((name, state_str)) = right.split_once(':') {
@@ -746,21 +810,19 @@ impl FromStr for AliasAction {
             return Ok(Self::Invalid);
         }
 
-        // 2. Pre-process Negation
-        let (is_negated, search_term) = if let Some(stripped) = low.strip_prefix("--no-") {
+        // 3. Pre-process Negation on the FIRST token (the command)
+        let first_token = parts[0].to_lowercase();
+        let (is_negated, search_term) = if let Some(stripped) = first_token.strip_prefix("--no-") {
             (true, format!("--{}", stripped))
         } else {
-            (false, low.clone())
+            (false, first_token.clone())
         };
 
-        // 3. Handle Key=Value Pairs
-        if let Some((left, right)) = low.split_once('=') {
+        // 4. Handle Key=Value Pairs (Unchanged)
+        if let Some((left, right)) = first_token.split_once('=') {
             return Ok(match left {
-                "--edalias" | "--edaliases"     => Self::Edit(Some(right.trim_matches('"').to_string())),
-                "--remove"                      => Self::Remove(right.to_string()),
-                "--unalias"                     => Self::Unalias(right.to_string()),
-                // This was the "Black Hole" - it was catching __internal_toggle
-                _ if !left.starts_with('-') => Self::Set(SetOptions {
+                "--edalias" | "--edaliases" => Self::Edit(Some(right.trim_matches('"').to_string())),
+                _ if !left.starts_with("--") => Self::Set(SetOptions {
                     name: left.to_string(),
                     value: right.to_string(),
                     volatile: false,
@@ -770,60 +832,81 @@ impl FromStr for AliasAction {
             });
         }
 
-        // 4. Single Match Block for all Standalone Flags
-        Ok(match search_term.as_str() {
-            // Toggable Flags
-            "--icons" => if is_negated { Self::NoIcons } else { Self::Icons },
-            "--tips"  => if is_negated { Self::NoTips } else { Self::Tips },
+        // 5. Standalone Flags - Now using 'parts' safely
+        match search_term.as_str() {
+            "--icons" => Ok(if is_negated { Self::NoIcons } else { Self::Icons }),
+            "--tips"  => Ok(if is_negated { Self::NoTips  } else { Self::Tips  }),
+            "--quiet" => Ok(if is_negated { Self::NoQuiet } else { Self::Quiet }),
+            "--force" => Ok(if is_negated { Self::NoForce } else { Self::Force }),
 
-            // Standard Flags (Negation not supported/ignored)
-            "--help"                       => if is_negated { Self::Invalid } else { Self::Help },
-            "--reload"                     => if is_negated { Self::Invalid } else { Self::Reload },
-            "--setup"                      => if is_negated { Self::Invalid } else { Self::Setup },
-            "--startup"                    => if is_negated { Self::Invalid } else { Self::Startup },
-            "--clear"                      => if is_negated { Self::Invalid } else { Self::Clear },
-            "--which"                      => if is_negated { Self::Invalid } else { Self::Which },
-            "--edalias" | "--edaliases"    => if is_negated { Self::Invalid } else { Self::Edit(None) },
-            "--showall" | "--all"          => if is_negated { Self::Invalid } else { Self::ShowAll },
-            "--file"                       => if is_negated { Self::Invalid } else { Self::File },
-            "--quiet"                      => if is_negated { Self::Invalid } else { Self::Quiet },
-            "--temp"                       => if is_negated { Self::Invalid } else { Self::Temp },
-            "--force"                      => if is_negated { Self::Invalid } else { Self::Force },
-            "--unalias"                    => if is_negated { Self::Invalid } else { Self::Unalias(String::new()) },
-            "--remove"                     => if is_negated { Self::Invalid } else { Self::Remove(String::new()) },
+            "--unalias" => {
+                if is_negated { return Ok(Self::Invalid); }
+                if parts.len() > 1 {
+                    // Symmetry Fix: Reconstruct the name from the second token
+                    Ok(Self::Unalias(SetOptions::volatile(parts[1].to_string(), false)))
+                } else {
+                    Ok(Self::Unalias(SetOptions::empty(true)))
+                }
+            },
+            "--remove" => {
+                if is_negated { return Ok(Self::Invalid); }
+                if parts.len() > 1 {
+                    Ok(Self::Remove(SetOptions::involatile(parts[1].to_string(), false)))
+                } else {
+                    Ok(Self::Remove(SetOptions::empty(false)))
+                }
+            },
+            "--help"                    => Ok(if is_negated { Self::Invalid } else { Self::Help }),
+            "--reload"                  => Ok(if is_negated { Self::Invalid } else { Self::Reload }),
+            "--setup"                   => Ok(if is_negated { Self::Invalid } else { Self::Setup }),
+            "--startup"                 => Ok(if is_negated { Self::Invalid } else { Self::Startup }),
+            "--clear"                   => Ok(if is_negated { Self::Invalid } else { Self::Clear }),
+            "--which"                   => Ok(if is_negated { Self::Invalid } else { Self::Which }),
+            "--edalias" | "--edaliases" => Ok(if is_negated { Self::Invalid } else { Self::Edit(None) }),
+            "--showall" | "--all"       => Ok(if is_negated { Self::Invalid } else { Self::ShowAll }),
+            "--file"                    => Ok(if is_negated { Self::Invalid } else { Self::File }),
+            "--temp"                    => Ok(if is_negated { Self::Invalid } else { Self::Temp }),
 
-            // Catch-alls
-            _ if low.starts_with("--") => Self::Invalid,
-            _                              => Self::Query(s.to_string()),
-        })
+            _ if first_token.starts_with("--")  => Ok(Self::Invalid),
+            _                                   => Ok(Self::Query(s.to_string())),
+        }
     }
 }
 impl fmt::Display for AliasAction {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Help                   => write!(f, "--help"),
-            Self::Reload                 => write!(f, "--reload"),
-            Self::Setup                  => write!(f, "--setup"),
-            Self::Clear                  => write!(f, "--clear"),
-            Self::Which                  => write!(f, "--which"),
-            Self::ShowAll                => write!(f, "--all"),
-            Self::File                   => write!(f, "--file"),
-            Self::Edit(Some(ed)) => write!(f, "--edalias={}", ed),
-            Self::Edit(None)             => write!(f, "--edalias"),
-            Self::Remove(t)      => write!(f, "--remove={}", t),
-            Self::Unalias(t)     => write!(f, "--unalias={}", t),
-            Self::Set(opt)   => write!(f, "{}={}", opt.name, opt.value),
-            Self::Query(q)       => write!(f, "{}", q),
-            Self::Invalid                => write!(f, "--invalid"),
-            Self::Fail                   => write!(f, "--fail"),
+            Self::Clear                 => write!(f, "--clear"),
+            Self::Edit(None)            => write!(f, "--edalias"),
+            Self::Edit(Some(ed))=> write!(f, "--edalias={}", ed),
+            Self::File                  => write!(f, "--file"),
             Self::Force                 => write!(f, "--force"),
-            Self::Startup               => write!(f, "--startup"),
-            Self::Temp                  => write!(f, "--temp"),
-            Self::Quiet                 => write!(f, "--quiet"),
+            Self::NoForce               => write!(f, "--no-force"),
+            Self::Help                  => write!(f, "--help"),
             Self::Icons                 => write!(f, "--icons"),
             Self::NoIcons               => write!(f, "--no-icons"),
+            Self::Query(q)      => write!(f, "{}", q),
+            Self::Quiet                 => write!(f, "--quiet"),
+            Self::NoQuiet               => write!(f, "--no-quiet"),
+            Self::Reload                => write!(f, "--reload"),
+            AliasAction::Remove(opts) => {
+                if opts.name.is_empty() { write!(f, "--remove") }
+                else { write!(f, "--remove {}", opts.name) }
+            },
+            Self::Set(opt)  => write!(f, "{}={}", opt.name, opt.value),
+            Self::Setup                 => write!(f, "--setup"),
+            Self::ShowAll               => write!(f, "--all"),
+            Self::Startup               => write!(f, "--startup"),
+            Self::Temp                  => write!(f, "--temp"),
             Self::Tips                  => write!(f, "--tips"),
             Self::NoTips                => write!(f, "--no-tips"),
+            AliasAction::Unalias(opts) => {
+                if opts.name.is_empty() { write!(f, "--unalias") }
+                else { write!(f, "--unalias {}", opts.name) }
+            },
+            Self::Which                 => write!(f, "--which"),
+            // options the actually have ro CLI
+            Self::Fail                  => write!(f, "--fail"),
+            Self::Invalid               => write!(f, "--invalid"),
             Self::Toggle(from, to) => write!(f, "__internal_toggle={}:{}", from, to),
         }
     }
@@ -843,24 +926,26 @@ impl<'a> std::fmt::Display for AliasErrorString<'a> {
             },
             AliasAction::Fail => write!(f, "General Error"),
             AliasAction::File => write!(f, "Error loading file for actions or load"),
+            AliasAction::Force => write!(f, "Error setting/using force case"),
+            AliasAction::NoForce => write!(f, "Error unsetting/disabling force case"),
             AliasAction::Help => write!(f, "Display help"),
             AliasAction::Invalid => write!(f, "Unrecognized or malformed command"),
             AliasAction::Icons => write!(f, "Error setting icons"),
             AliasAction::NoIcons => write!(f, "Error unsetting icons"),
             AliasAction::Query(name) => write!(f, "Error querying alias {}: ", name),
             AliasAction::Reload => write!(f, "Error reloading configuration"),
-            AliasAction::Remove(name) => write!(f, "Error removing alias: {}", name),
+            AliasAction::Remove(opts) => write!(f, "Error removing alias: {}", opts.name),
             AliasAction::Set(opts) => write!(f, "Error setting alias: {}", opts.name),
             AliasAction::Setup => write!(f, "Error setting up autorun registry entry"),
             AliasAction::ShowAll => write!(f, "Error showing all aliases"),
             AliasAction::Tips => write!(f, "Error setting tips"),
             AliasAction::NoTips => write!(f, "Error unsetting tips"),
-            AliasAction::Unalias(alias) => write!(f, "Error unaliasing alias: {}", alias),
+            AliasAction::Unalias(opts) => write!(f, "Error unaliasing alias: {}", opts.name),
             AliasAction::Which => write!(f, "Error running diagnostics"),
-            AliasAction::Force => write!(f, "Error setting/using force case"),
             AliasAction::Startup => write!(f, "Error setting/using statup mode"),
             AliasAction::Temp => write!(f, "Error setting/using process as memory only"),
             AliasAction::Quiet => write!(f, "Error setting/using quiet mode"),
+            AliasAction::NoQuiet => write!(f, "Error unsetting/disabling quiet mode"),
             AliasAction::Toggle(from, to) => write!(f, "Error reverse mapping {} to {}", from, to),
         }
     }
@@ -1129,7 +1214,7 @@ pub fn run<P: AliasProvider>(mut args: Vec<String>) -> Result<(), Box<dyn std::e
     }
 
     // 6. EXECUTION LOOP (The Forensic Dispatcher)
-    for task in queue.tasks {
+    for task in queue {
         // 1. Resolve the target for this specific task
         let target_path = if task.path.as_os_str().is_empty() {
             &default_path
@@ -1184,15 +1269,12 @@ pub fn parse_arguments(args: &[String]) -> (TaskQueue, Verbosity) {
     let mut volatile = false;
     let mut force_case = false;
     let mut pivot_index = args.len();
-    let mut skip_next = false;
+    let mut skip_count = 0;
     let mut saw_unknown = false;
     let mut is_literal = false;
     // --- STEP 1: FLAG HARVESTING ---
     for (i, arg) in args.iter().enumerate().skip(1) {
-        if skip_next {
-            skip_next = false;
-            continue;
-        }
+        if skip_count > 0 { skip_count -= 1; continue; }
 
         // 1. Keep the Bridge check first
         if arg == "--" {
@@ -1221,20 +1303,39 @@ pub fn parse_arguments(args: &[String]) -> (TaskQueue, Verbosity) {
                 continue;
             }
             // Modifiers (These don't push to queue, just change local state)
-            // You'll need to add "Quiet", "Temp", "Force", and "Startup" to your enum
             AliasAction::Icons   => { voice.show_icons = ShowFeature::On; continue; },
             AliasAction::NoIcons => { voice.show_icons = ShowFeature::Off; continue; },
             AliasAction::Tips => { voice.show_icons = ShowFeature::On; continue; },
             AliasAction::NoTips  => { voice.show_tips = ShowTips::Off; continue; },
             AliasAction::Quiet => { voice.level = VerbosityLevel::Silent; voice.show_icons = ShowFeature::Off; continue; },
+            AliasAction::NoQuiet => { voice.level = VerbosityLevel::default(); continue; },
             AliasAction::Temp => { volatile = true; continue; },
             AliasAction::Force => { force_case = true; continue; },
+            AliasAction::NoForce => { force_case = false; continue; },
             AliasAction::Startup => {
                 if voice.in_setup { setup_failure!(voice, queue, arg); }
                 voice = voice!(Mute, Off, Off);
                 voice.in_startup = true;
                 continue;
             }
+            // the inline explicit alias setter.
+            AliasAction::Set(_) => {
+                if voice.in_setup { setup_failure!(voice, queue, arg); }
+                // if arg != "--set" { pivot_index = i; break; }
+                if !AliasAction::is_switch(arg) { pivot_index = i; break; }
+                let next_idx = i + 1;
+                if let Some(_payload_start) = args.get(next_idx) {
+                    let (action, consumed) = parse_set_argument(&voice, &args[next_idx..], volatile, force_case, is_literal);
+                    queue.push(action);
+                    skip_count = consumed;
+                    pivot_index = i + 1 + consumed;
+                    continue;
+                } else {
+                    scream!(voice, AliasIcon::Alert, "--set requires a name=value pair");
+                    queue.push(AliasAction::Fail);
+                }
+                continue;
+            },
             // The Consuming Intent (Triggers your existing logic)
             AliasAction::File => {
                 let mut invalidate = false;
@@ -1262,7 +1363,7 @@ pub fn parse_arguments(args: &[String]) -> (TaskQueue, Verbosity) {
                     }
                     //let action = if invalidate { AliasAction::Fail } else { AliasAction::File };
                     queue.push_file(AliasAction::File, raw_p);
-                    skip_next = true;
+                    skip_count = 1;
                     pivot_index = i + 2;
                 } else {
 
@@ -1280,12 +1381,12 @@ pub fn parse_arguments(args: &[String]) -> (TaskQueue, Verbosity) {
                     // If the next thing is just a Query (a name), we harvest it
                     if matches!(next_intent, AliasAction::Query(_)) && is_valid_name(next) {
                         let harvested = if matches!(trigger, AliasAction::Unalias(_)) {
-                            AliasAction::Unalias(next.to_string())
+                            AliasAction::Unalias( SetOptions::volatile(next.clone(), force_case) )
                         } else {
-                            AliasAction::Remove(next.to_string())
+                            AliasAction::Remove( SetOptions::involatile(next.clone(), force_case) )
                         };
                         queue.push(harvested);
-                        skip_next = true;
+                        skip_count = 1;
                         pivot_index = i + 2;
                         continue;
                     }
@@ -1458,13 +1559,16 @@ pub fn parse_set_argument(
     }
 
     trace!("saw={}, cmd_parts.len={}", saw_equals, cmd_parts.len());
-    // CASE A: The "Empty Strike" (name= or name =)
+    // CASE A: The "Empty Strike"
     if saw_equals && cmd_parts.is_empty() {
-        trace!("AliasAction::Unalias");
-        return if volatile { (AliasAction::Unalias(name), i) }
-        else { (AliasAction::Remove(name), i) };
+        let opts = if volatile { SetOptions::volatile(name, force_case)
+        } else { SetOptions::involatile(name, force_case) };
+        return if volatile {
+            (AliasAction::Unalias(opts), i)
+        } else {
+            (AliasAction::Remove(opts), i)
+        };
     }
-
     // CASE B: The Query (No equals sign and no values found)
     if !saw_equals && cmd_parts.is_empty() {
         trace!("AliasAction::Query");
@@ -1489,43 +1593,10 @@ pub fn dispatch<P: AliasProvider>(task: Task, verbosity: &Verbosity, ) -> Result
     let path = &task.path;
 
     match task.action {
-        AliasAction::Set(opts) => {
-            // Path is guaranteed by the 'run' hydration
-            P::set_alias(opts, path, verbosity)?;
+        AliasAction::Clear => {
+            whisper!(verbosity, "Purging RAM macros...");
+            P::purge_ram_macros(verbosity)?;
         }
-
-        AliasAction::Remove(raw_name) => {
-            let name = raw_name.split('=').next().unwrap_or(&raw_name).trim();
-            if !name.is_empty() {
-                let opts = SetOptions {
-                    name: name.to_string(),
-                    value: String::new(),
-                    volatile: false,
-                    force_case: false,
-                };
-                P::set_alias(opts, path, verbosity)?;
-                say!(verbosity, AliasIcon::File, "Removed alias '{}' from {}", name, path.display());
-            } else {
-                return Err(failure!(verbosity, ErrorCode::MissingName, "Error: name required"));
-            }
-        }
-
-        AliasAction::Unalias(raw_name) => {
-            let name = raw_name.split('=').next().unwrap_or(&raw_name).trim();
-            if !name.is_empty() {
-                let opts = SetOptions {
-                    name: name.to_string(),
-                    value: String::new(),
-                    volatile: true,
-                    force_case: false,
-                };
-                P::set_alias(opts, path, verbosity)?;
-                say!(verbosity, AliasIcon::File, "Removed alias '{}' ", name);
-            } else {
-                return Err(failure!(verbosity, ErrorCode::MissingName, "Error: name required"));
-            }
-        }
-
         AliasAction::Edit(custom_editor) => {
             let report = P::purge_file_macros(verbosity, path)?;
             for (failed_name, _error_code) in report.failed {
@@ -1535,57 +1606,83 @@ pub fn dispatch<P: AliasProvider>(task: Task, verbosity: &Verbosity, ) -> Result
             // Immediate sync so the edits are live in RAM
             P::reload_full(verbosity, path, false)?;
         }
-
-        AliasAction::Which => {
-            P::alias_show_all(verbosity)?;
-            say!(verbosity, AliasIcon::None, "\n");
-            P::run_diagnostics(path, verbosity)?;
-        },
-
-        AliasAction::Reload => P::reload_full(verbosity, path, true)?,
-
+        AliasAction::File  => {
+            P::reload_full(verbosity, path, false)?;
+        }
+        AliasAction::Help => print_help(verbosity, HelpMode::Full, Some(path)),
         AliasAction::Query(term) => {
             for line in P::query_alias(&term, verbosity) {
                 verbosity.whisper(&line);
             }
         }
-
+        AliasAction::Reload => P::reload_full(verbosity, path, true)?,
+        AliasAction::Remove(opts) => {
+            if !opts.name.is_empty() {
+                if opts.volatile == true {
+                    return Err(failure!(verbosity, ErrorCode::Syntax, "Remove is a dual action"));
+                }
+                let name = opts.name.to_string();
+                P::set_alias(opts, path, verbosity)?;
+                say!(verbosity, AliasIcon::File, "Removed alias '{}' from {}", name, path.display());
+            } else {
+                return Err(failure!(verbosity, ErrorCode::MissingName, "Error: name required"));
+            }
+        }
+        AliasAction::Set(opts) => {
+            // Path is guaranteed by the 'run' hydration
+            P::set_alias(opts, path, verbosity)?;
+        }
         AliasAction::ShowAll => P::alias_show_all(verbosity)?,
-
-        AliasAction::Clear => {
-            whisper!(verbosity, "Purging RAM macros...");
-            P::purge_ram_macros(verbosity)?;
+        AliasAction::Which => {
+            P::alias_show_all(verbosity)?;
+            say!(verbosity, AliasIcon::None, "\n");
+            P::run_diagnostics(path, verbosity)?;
+        },
+        AliasAction::Unalias(mut opts) => {
+            if !opts.name.is_empty() {
+                 trace!("volatile flag is:{}", opts.volatile);
+                 opts.name = opts.name.trim().to_string();
+                if opts.volatile == false {
+                    return Err(failure!(verbosity, ErrorCode::Syntax, "Unalias is a memory only action"));
+                }
+                if opts.name.is_empty() {
+                    return Err(failure!(verbosity, ErrorCode::MissingName, "Error: Alias name required"));
+                }
+                let display_name = opts.name.clone();
+                P::set_alias(opts, path, verbosity)?;
+                say!(verbosity, AliasIcon::File, "Removed alias '{}'", display_name);
+            } else {
+                return Err(failure!(verbosity, ErrorCode::MissingName, "Error:Alias name ia required"));
+            }
         }
 
-        AliasAction::Help => print_help(verbosity, HelpMode::Full, Some(path)),
-
-        AliasAction::File  => {
-            P::reload_full(verbosity, path, false)?;
-        }
-
-        AliasAction::Setup => {
-            scream!(verbosity, AliasIcon::Alert, "Setup should never be dispatched (Handled seperately).");
-            print_help(verbosity, HelpMode::Short, Some(path));
-        }
-
-        AliasAction::Fail => {
-            scream!(verbosity, AliasIcon::Alert, "Failed command state.");
-            print_help(verbosity, HelpMode::Short, Some(path));
-        }
-
+        // errors and mismatches
         AliasAction::Invalid => {
             scream!(verbosity, AliasIcon::Alert, "Invalid command state.");
             print_help(verbosity, HelpMode::Short, Some(path));
         }
+        AliasAction::Fail => {
+            scream!(verbosity, AliasIcon::Alert, "Failed command state.");
+            print_help(verbosity, HelpMode::Short, Some(path));
+        }
+        // modifiers not actions
         AliasAction::Force => {dispatch_failure!(verbosity, AliasAction::Force, "Metadata Leak: Parser state variant reached the executor.");}
-        AliasAction::Startup => {dispatch_failure!(verbosity, AliasAction::Startup, "Metadata Leak: Parser state variant reached the executor.");}
-        AliasAction::Temp => {dispatch_failure!(verbosity, AliasAction::Temp, "Metadata Leak: Parser state variant reached the executor.");}
-        AliasAction::Quiet => {dispatch_failure!(verbosity, AliasAction::Quiet, "Metadata Leak: Parser state variant reached the executor.");}
+        AliasAction::NoForce => {dispatch_failure!(verbosity, AliasAction::Force, "Metadata Leak: Parser state variant reached the executor.");}
         AliasAction::Icons => {dispatch_failure!(verbosity, AliasAction::Quiet, "Metadata Leak: Parser state variant reached the executor.");}
         AliasAction::NoIcons => {dispatch_failure!(verbosity, AliasAction::Quiet, "Metadata Leak: Parser state variant reached the executor.");}
+        AliasAction::Quiet => {dispatch_failure!(verbosity, AliasAction::Quiet, "Metadata Leak: Parser state variant reached the executor.");}
+        AliasAction::NoQuiet => {dispatch_failure!(verbosity, AliasAction::Quiet, "Metadata Leak: Parser state variant reached the executor.");}
+        AliasAction::Setup => {
+            scream!(verbosity, AliasIcon::Alert, "Setup should never be dispatched (Handled separately).");
+            print_help(verbosity, HelpMode::Short, Some(path));
+        }
+        AliasAction::Startup => {dispatch_failure!(verbosity, AliasAction::Startup, "Metadata Leak: Parser state variant reached the executor.");}
+        AliasAction::Temp => {dispatch_failure!(verbosity, AliasAction::Temp, "Metadata Leak: Parser state variant reached the executor.");}
         AliasAction::Tips => {dispatch_failure!(verbosity, AliasAction::Quiet, "Metadata Leak: Parser state variant reached the executor.");}
         AliasAction::NoTips => {dispatch_failure!(verbosity, AliasAction::Quiet, "Metadata Leak: Parser state variant reached the executor.");}
+        // back map
         AliasAction::Toggle(_, _) => {dispatch_failure!(verbosity, AliasAction::Quiet, "Metadata Leak: Parser state variant reached the executor.");}
+
     }
     Ok(())
 }
