@@ -331,6 +331,18 @@ impl BinaryProfile {
     }
 }
 
+pub enum AccessResult {
+    Ready,
+    Empty,
+    Blocked(String),
+}
+pub enum PathIntegrity {
+    Healthy,      // Responsive and exists
+    Missing,      // Responsive but file not found
+    Unresponsive, // Timeout/Hardware hang
+}
+
+
 #[derive(Debug, Clone, Copy)]
 #[repr(usize)]
 pub enum AliasIcon {
@@ -685,12 +697,12 @@ impl From<String> for SetOptions {
 
 #[derive(Debug, PartialEq, Clone)]
 pub enum AliasAction {
+    Case,
+    NoCase,
     Clear,
     Edit(Option<String>),
     File,
     Fail,
-    Force,
-    NoForce,
     Help,
     Icons,
     NoIcons,
@@ -701,6 +713,7 @@ pub enum AliasAction {
     ShowAll,
     Startup,
     Temp,
+    NoTemp,
     Tips,
     NoTips,
     Query(String),
@@ -724,10 +737,11 @@ impl AliasAction {
             AliasAction::Which             => "--which".to_string(),
             AliasAction::Startup           => "--startup".to_string(),
             AliasAction::Temp              => "--temp".to_string(),
+            AliasAction::NoTemp              => "--no-temp".to_string(),
 
             // --- The Symmetric Toggles ---
-            AliasAction::Force             => "--force".to_string(),
-            AliasAction::NoForce           => "--no-force".to_string(),
+            AliasAction::Case             => "--case".to_string(),
+            AliasAction::NoCase           => "--no-case".to_string(),
             AliasAction::Quiet             => "--quiet".to_string(),
             AliasAction::NoQuiet           => "--no-quiet".to_string(),
             AliasAction::Icons             => "--icons".to_string(),
@@ -748,7 +762,7 @@ impl AliasAction {
             AliasAction::Set(opts) => {
                 let mut s = format!("{}={}", opts.name, opts.value);
                 if opts.volatile { s.push_str(" --temp"); }
-                if opts.force_case { s.push_str(" --force"); }
+                if opts.force_case { s.push_str(" --case"); }
                 s
             }
             // --- Internal/UI Only (Return empty or specific marker) ---
@@ -837,7 +851,8 @@ impl FromStr for AliasAction {
             "--icons" => Ok(if is_negated { Self::NoIcons } else { Self::Icons }),
             "--tips"  => Ok(if is_negated { Self::NoTips  } else { Self::Tips  }),
             "--quiet" => Ok(if is_negated { Self::NoQuiet } else { Self::Quiet }),
-            "--force" => Ok(if is_negated { Self::NoForce } else { Self::Force }),
+            "--case" => Ok(if is_negated { Self::NoCase } else { Self::Case }),
+            "--temp" => Ok(if is_negated { Self::NoTemp } else { Self::Temp }),
 
             "--unalias" => {
                 if is_negated { return Ok(Self::Invalid); }
@@ -865,7 +880,6 @@ impl FromStr for AliasAction {
             "--edalias" | "--edaliases" => Ok(if is_negated { Self::Invalid } else { Self::Edit(None) }),
             "--showall" | "--all"       => Ok(if is_negated { Self::Invalid } else { Self::ShowAll }),
             "--file"                    => Ok(if is_negated { Self::Invalid } else { Self::File }),
-            "--temp"                    => Ok(if is_negated { Self::Invalid } else { Self::Temp }),
 
             _ if first_token.starts_with("--")  => Ok(Self::Invalid),
             _                                   => Ok(Self::Query(s.to_string())),
@@ -879,8 +893,8 @@ impl fmt::Display for AliasAction {
             Self::Edit(None)            => write!(f, "--edalias"),
             Self::Edit(Some(ed))=> write!(f, "--edalias={}", ed),
             Self::File                  => write!(f, "--file"),
-            Self::Force                 => write!(f, "--force"),
-            Self::NoForce               => write!(f, "--no-force"),
+            Self::Case                  => write!(f, "--case"),
+            Self::NoCase                => write!(f, "--no-case"),
             Self::Help                  => write!(f, "--help"),
             Self::Icons                 => write!(f, "--icons"),
             Self::NoIcons               => write!(f, "--no-icons"),
@@ -897,6 +911,7 @@ impl fmt::Display for AliasAction {
             Self::ShowAll               => write!(f, "--all"),
             Self::Startup               => write!(f, "--startup"),
             Self::Temp                  => write!(f, "--temp"),
+            Self::NoTemp                => write!(f, "--no-temp"),
             Self::Tips                  => write!(f, "--tips"),
             Self::NoTips                => write!(f, "--no-tips"),
             AliasAction::Unalias(opts) => {
@@ -926,8 +941,8 @@ impl<'a> std::fmt::Display for AliasErrorString<'a> {
             },
             AliasAction::Fail => write!(f, "General Error"),
             AliasAction::File => write!(f, "Error loading file for actions or load"),
-            AliasAction::Force => write!(f, "Error setting/using force case"),
-            AliasAction::NoForce => write!(f, "Error unsetting/disabling force case"),
+            AliasAction::Case => write!(f, "Error setting/using force case"),
+            AliasAction::NoCase => write!(f, "Error unsetting/disabling force case"),
             AliasAction::Help => write!(f, "Display help"),
             AliasAction::Invalid => write!(f, "Unrecognized or malformed command"),
             AliasAction::Icons => write!(f, "Error setting icons"),
@@ -944,6 +959,7 @@ impl<'a> std::fmt::Display for AliasErrorString<'a> {
             AliasAction::Which => write!(f, "Error running diagnostics"),
             AliasAction::Startup => write!(f, "Error setting/using statup mode"),
             AliasAction::Temp => write!(f, "Error setting/using process as memory only"),
+            AliasAction::NoTemp => write!(f, "Error setting/using process as dual (mem/disk))"),
             AliasAction::Quiet => write!(f, "Error setting/using quiet mode"),
             AliasAction::NoQuiet => write!(f, "Error unsetting/disabling quiet mode"),
             AliasAction::Toggle(from, to) => write!(f, "Error reverse mapping {} to {}", from, to),
@@ -981,10 +997,12 @@ pub const TIPS_ARRAY: &[&str] = &[
     "Tired of Notepad? Set 'EDITOR=code' in your env to use VS Code for --edalias.",
     "Tired of Notepad? Set 'VISUAL=code' in your env to use VS Code for --edalias.",
     "Use --temp to keep an alias in RAM only—it vanishes when you close the window.",
-    "The Audit (alias --which) checks if your File, and the system are in sync.",
+    "Use --no-temp if you want to ensure an alias persists to your config file.",
+    "The Audit (alias --which) checks if your File, Registry, and RAM are in sync.",
     "You can use $* in your values! e.g., 'alias g=git $*' passes all args to git.",
-    "Hate icons? Set 'ALIAS_OPTS=--no-icons' in your system environment to hide them.",
+    "Hate icons? Set 'ALIAS_OPTS=--no-icons' in your environment to hide them.",
     "Too noisy? Set 'ALIAS_OPTS=--quiet' to reduce the output.",
+    "Use --no-quiet to temporarily override a global quiet setting.",
     "Run 'alias --reload' to force-sync your current session with your config file.",
     "alias --setup hooks into the registry so your macros 'just work' in every window.",
     "Type 'alias <name>' (without an '=') to see what a specific macro does.",
@@ -994,30 +1012,25 @@ pub const TIPS_ARRAY: &[&str] = &[
     "Setting an alias to empty (alias x=) is a shortcut for the --remove command.",
     "A 'Pending' audit status means your file changed but you haven't run --reload.",
     "Diagnostics do a 1-byte 'heartbeat' to verify your drive is responsive.",
-    "Deletions ignore case to prevent messy 'G=git' and 'g=git' duplicates.",
+    "By default, matching is case-insensitive. Use --case to force strict matching.",
+    "Deletions now respect your --case/--no-case preference for surgical removal.",
     "--setup hooks the AutoRun registry so macros work in every new window.",
     "The tool detects 'Read-Only' files and warns you before attempting a strike.",
     "Use --file <path> to use a custom alias list without changing env vars.",
     "The Triple Audit aligns icons in a vertical [WDF] block for easy scanning.",
     "Checking registry sync ensures your AutoRun points to the right alias.exe.",
-    "Use a filename 'set ALIAS_FILE=' in your env to use a default aliases file",
-    "Tired of resetting your aliases every time? try --setup",
-    "The tool uses an 'Atomic Rename' when saving, so your alias file is never corrupted if a crash occurs during a write.",
-    "Flags placed in the 'ALIAS_OPTS' env var are auto-injected, letting you set global defaults like --quiet or --no-tips.",
-    "Running --which identifies 'Phantom' aliases—macros stuck in your RAM that no longer exist in your config file.",
-    "Setting an alias to an empty value (e.g., 'alias x=') is a fast shortcut for the permanent --remove command.",
-    "The 'Triple Audit' compares the Win32 Kernel, Doskey wrapper, and your File to find every possible synchronization gap.",
-    "A 'Pending' status in the audit means you've saved a change to your file but haven't run 'alias --reload' to activate it.",
-    "The tool performs a 1-byte 'heartbeat' read on your config file to verify your drive is actually alive and responsive.",
-    "Case-insensitivity is enforced during deletions to prevent messy duplicates like 'G=git' and 'g=git' in your file.",
-    "The --setup flag hooks your aliases into the 'AutoRun' registry so they are available in every new console window.",
-    "The tool automatically detects if your alias file is 'Read-Only' and will warn you before attempting a strike.",
-    "You can use --file <path> to temporarily use a different alias collection without changing your environment variables.",
-    "Diagnostics check your registry sync status to ensure your AutoRun command matches the current location of alias.exe.",
-    "Transactional logic ensures that if a file write fails, the RAM state isn't updated, keeping your system in a known state.",
-    "The 'Triple Audit' alignment uses 2-column spacing for icons to ensure the [WDF] block stays perfectly vertical.",
-    "The tool identifies 'Legacy Wrappers' vs 'Win32 Kernel' aliases to help debug issues with different terminal types.",
-    "Your current binary location is tracked in diagnostics to help you find where alias.exe is actually running from.",
+    "Use 'set ALIAS_FILE=path' in your env to use a default aliases file.",
+    "Transactional logic ensures that if a file write fails, the RAM state isn't updated.",
+    "Your current binary location is tracked in diagnostics to help you find alias.exe.",
+    "Use --no-case to ensure an alias matches regardless of capitalization (Default).",
+    "Want help every time? Use --tips. Tired of them? Use --no-tips.",
+    "The [WDF] block stands for Win32-Kernel, Doskey-Wrapper, and File-Storage.",
+    "Did you know commands are processed in order? Intersperse modifiers on the fly!",
+    "Win32 API mode injects directly into the console kernel for maximum speed.",
+    "Wrapper mode uses the classic doskey bridge for maximum shell compatibility.",
+    "Hybrid mode balances direct injection with file-backed persistence.",
+    "The tool identifies 'Legacy Wrappers' vs 'Win32 Kernel' aliases to help debug terminals.",
+    "There are 3 version of alias.exe. One win32 API, one wrapper for doskey, and one hybrid.",
 ];
 
 //////////////////////////////////////////////////////
@@ -1034,7 +1047,28 @@ pub trait AliasProvider {
     fn write_autorun_registry(cmd: &str, verbosity: &Verbosity) -> io::Result<()>;
     fn read_autorun_registry() -> String;
     fn purge_ram_macros(verbosity: &Verbosity) -> io::Result<PurgeReport>;
-    fn purge_file_macros(verbosity: &Verbosity, path: &Path) -> io::Result<PurgeReport>;
+    fn purge_file_macros(verbosity: &Verbosity, path: &Path) -> io::Result<PurgeReport> {
+        let mut report = PurgeReport::default();
+
+        // 1. Read the file into memory
+        let content = std::fs::read_to_string(path)
+            .map_err(|e| io::Error::new(io::ErrorKind::NotFound, format!("Could not read alias file: {}", e)))?;
+        whisper!(verbosity, AliasIcon::File, "Clearing macros from {}", path.display());
+        // 2. Iterate through every data line in the file
+        for line in content.lines() {
+            if let Some((name, _)) = is_data_line(line) {
+                // 3. Unset the alias from the Win32/OS RAM
+                // Passing None to raw_set_macro is the trigger to delete
+                if Self::raw_set_macro(name, None)? {
+                    report.cleared.push(name.to_string());
+                } else {
+                    report.failed.push((name.to_string(), 0));
+                }
+            }
+        }
+        Ok(report)
+    }
+
     fn reload_full(verbosity: &Verbosity, path: &Path, clear: bool) -> Result<(), Box<dyn std::error::Error>> {
         // Call our own purge logic
         if clear { Self::purge_ram_macros(verbosity)?; }
@@ -1128,8 +1162,10 @@ pub trait AliasProvider {
             if !input.is_empty() {
                 let path = PathBuf::from(input);
                 if !path.exists() { std::fs::File::create(&path)?; }
-                let abs_path = std::fs::canonicalize(&path).unwrap_or(path);
-                startup_command = format!("--file \"{}\"", abs_path.display());
+                let abs_path = std::fs::canonicalize(&path)
+                    .map(normalize_path)
+                    .unwrap_or_else(|_| normalize_path(path));
+                startup_command = format!("--file \"{}\"", abs_path);
             }
         }
 
@@ -1165,7 +1201,7 @@ pub fn run<P: AliasProvider>(mut args: Vec<String>) -> Result<(), Box<dyn std::e
         let extra: Vec<String> = opts.split_whitespace()
             .map(String::from)
             .filter(|opt| matches!(opt.as_str(),
-              "--quiet" | "--temp" | "--tips" | "--no-tips" | "--icons" | "--no-icons" | "--force"))
+              "--quiet" | "--temp" | "--tips" | "--no-tips" | "--icons" | "--no-icons" | "--case" | "--no-case" ))
             .collect();
         args.splice(1..1, extra);
     }
@@ -1310,8 +1346,9 @@ pub fn parse_arguments(args: &[String]) -> (TaskQueue, Verbosity) {
             AliasAction::Quiet => { voice.level = VerbosityLevel::Silent; voice.show_icons = ShowFeature::Off; continue; },
             AliasAction::NoQuiet => { voice.level = VerbosityLevel::default(); continue; },
             AliasAction::Temp => { volatile = true; continue; },
-            AliasAction::Force => { force_case = true; continue; },
-            AliasAction::NoForce => { force_case = false; continue; },
+            AliasAction::NoTemp => { volatile = false; continue; },
+            AliasAction::Case => { force_case = true; continue; },
+            AliasAction::NoCase => { force_case = false; continue; },
             AliasAction::Startup => {
                 if voice.in_setup { setup_failure!(voice, queue, arg); }
                 voice = voice!(Mute, Off, Off);
@@ -1453,7 +1490,7 @@ pub fn parse_arguments(args: &[String]) -> (TaskQueue, Verbosity) {
                 volatile = true;
                 i += 1; // Skip the flag so the next harvest gets the name
             }
-            // Add other "mid-stream" flags here if needed (--force, etc.)
+            // Add other "mid-stream" flags here if needed (--case, etc.)
         }
     }
     // --- STEP 3: THE RESOLUTION (The Sticky Sweep) ---
@@ -1666,23 +1703,23 @@ pub fn dispatch<P: AliasProvider>(task: Task, verbosity: &Verbosity, ) -> Result
             print_help(verbosity, HelpMode::Short, Some(path));
         }
         // modifiers not actions
-        AliasAction::Force => {dispatch_failure!(verbosity, AliasAction::Force, "Metadata Leak: Parser state variant reached the executor.");}
-        AliasAction::NoForce => {dispatch_failure!(verbosity, AliasAction::Force, "Metadata Leak: Parser state variant reached the executor.");}
-        AliasAction::Icons => {dispatch_failure!(verbosity, AliasAction::Quiet, "Metadata Leak: Parser state variant reached the executor.");}
-        AliasAction::NoIcons => {dispatch_failure!(verbosity, AliasAction::Quiet, "Metadata Leak: Parser state variant reached the executor.");}
+        AliasAction::Case => {dispatch_failure!(verbosity, AliasAction::Case, "Metadata Leak: Parser state variant reached the executor.");}
+        AliasAction::NoCase => {dispatch_failure!(verbosity, AliasAction::NoCase, "Metadata Leak: Parser state variant reached the executor.");}
+        AliasAction::Icons => {dispatch_failure!(verbosity, AliasAction::Icons, "Metadata Leak: Parser state variant reached the executor.");}
+        AliasAction::NoIcons => {dispatch_failure!(verbosity, AliasAction::NoIcons, "Metadata Leak: Parser state variant reached the executor.");}
         AliasAction::Quiet => {dispatch_failure!(verbosity, AliasAction::Quiet, "Metadata Leak: Parser state variant reached the executor.");}
-        AliasAction::NoQuiet => {dispatch_failure!(verbosity, AliasAction::Quiet, "Metadata Leak: Parser state variant reached the executor.");}
+        AliasAction::NoQuiet => {dispatch_failure!(verbosity, AliasAction::NoQuiet, "Metadata Leak: Parser state variant reached the executor.");}
         AliasAction::Setup => {
             scream!(verbosity, AliasIcon::Alert, "Setup should never be dispatched (Handled separately).");
             print_help(verbosity, HelpMode::Short, Some(path));
         }
         AliasAction::Startup => {dispatch_failure!(verbosity, AliasAction::Startup, "Metadata Leak: Parser state variant reached the executor.");}
         AliasAction::Temp => {dispatch_failure!(verbosity, AliasAction::Temp, "Metadata Leak: Parser state variant reached the executor.");}
-        AliasAction::Tips => {dispatch_failure!(verbosity, AliasAction::Quiet, "Metadata Leak: Parser state variant reached the executor.");}
-        AliasAction::NoTips => {dispatch_failure!(verbosity, AliasAction::Quiet, "Metadata Leak: Parser state variant reached the executor.");}
+        AliasAction::NoTemp => {dispatch_failure!(verbosity, AliasAction::NoTemp, "Metadata Leak: Parser state variant reached the executor.");}
+        AliasAction::Tips => {dispatch_failure!(verbosity, AliasAction::Tips, "Metadata Leak: Parser state variant reached the executor.");}
+        AliasAction::NoTips => {dispatch_failure!(verbosity, AliasAction::NoTips, "Metadata Leak: Parser state variant reached the executor.");}
         // back map
-        AliasAction::Toggle(_, _) => {dispatch_failure!(verbosity, AliasAction::Quiet, "Metadata Leak: Parser state variant reached the executor.");}
-
+        AliasAction::Toggle(ref _inner, _val) => {dispatch_failure!(verbosity, AliasAction::Fail, "Metadata Leak: Parser failed to unwrap Toggle");}
     }
     Ok(())
 }
@@ -1698,16 +1735,20 @@ pub fn open_editor(path: &Path, override_ed: Option<String>, verbosity: &Verbosi
     let mut profile = get_editor_preference(verbosity, &override_ed);
 
     // 2. Canonicalize the target file (The file the user wants to edit)
-    let absolute_path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    let absolute_path = path.canonicalize()
+        .map(normalize_path)
+        .unwrap_or_else(|_| normalize_path(path.to_path_buf()));
 
     // Safety Check
-    if !is_file_accessible(&absolute_path) {
-        return Err(io::Error::new(io::ErrorKind::Other, "Target file inaccessible."));
+    match verify_read_readiness(&PathBuf::from(&absolute_path)) {
+        AccessResult::Blocked(msg) => return Err(io::Error::new(io::ErrorKind::Other, msg)),
+        AccessResult::Empty => {},
+        AccessResult::Ready => {},
     }
 
     // 3. Prepare the Command Line
     // We append the target file to the end of the existing editor args
-    profile.args.push(absolute_path.to_string_lossy().to_string());
+    profile.args.push(absolute_path.to_string());
 
     say!(verbosity, &format!("Launching {}...", profile.args[0]));
 
@@ -1760,20 +1801,21 @@ USAGE:
     }
     shout!(verbosity, AliasIcon::None, r#"
 FLAGS:
-  --help                  Show this help menu
-  --quiet                 Suppress success output & icons
+FLAGS:
+  --[no-]case             Enable/Disable case-sensitive matching for this alias
   --edalias[=EDITOR]      Open alias file in editor
-  --file <path>           Specify a custom .doskey file
-  --force                 Bypass case-sensitivity checks
-  --reload                Force reload from file
-  --remove                Remove a specific alias from the alias file
+  --file <path>           Specify a custom .doskey file path
+  --help                  Show this help menu
+  --[no-]quiet            Suppress/Restore success output & icons
+  --reload                Force reload from file into memory
+  --remove                Remove a specific alias from the file and memory
   --setup                 Install AutoRun registry hook
-  --[no-]tips             Enable/Disable tips
-  --unalias               Remove a specific alias from memory
-  --temp                  Set alias in RAM only (volatile)
-  --which                 Run diagnostics & Triple Audit
-  --                      Stop processing arguments
-"#);
+  --[no-]temp             Set alias in RAM only (volatile)
+  --[no-]tips             Enable/Disable helpful tips
+  --unalias               Remove a specific alias from memory only
+  --which                 Run diagnostics & Audit
+  --                      Stop processing flags (treat rest as name/value)
+  "#);
 
     // 3. Environment (Keep these separate to use the Constants)
     shout!(verbosity, AliasIcon::Environment, "ENVIRONMENT:");
@@ -2022,21 +2064,6 @@ pub fn render_diagnostics(report: DiagnosticReport, verbosity: &Verbosity) {
 //// --- Utilities and Helpers ---
 ////
 //////////////////////////////////////////////////////
-pub fn is_path_healthy(path: &Path, threshold: usize) -> bool {
-    let meta = match path.metadata() {
-        Ok(m) => m,
-        Err(_) => return false,
-    };
-    if !meta.is_file() {
-        return false;
-    }
-    if meta.len() > threshold as u64 {
-        return false;
-    }
-
-    true
-}
-
 pub fn is_data_line(line: &str) -> Option<(&str, &str)> {
     let trimmed = line.trim();
 
@@ -2138,17 +2165,21 @@ fn dump_alias_file(verbosity: &Verbosity) -> Result<Vec<(String, String)>, Box<d
     let path = get_alias_path("").ok_or_else(|| {
         failure!(verbosity, ErrorCode::MissingFile, "Could not locate the alias configuration file.")
     })?;
-    if !is_file_accessible(&path) {
-        return Err(failure!(verbosity, ErrorCode::AccessDenied, "File is currently locked by another process."));
+    match verify_read_readiness(&PathBuf::from(&path)) {
+        AccessResult::Blocked(msg) => {
+            Err(failure!(verbosity, ErrorCode::AccessDenied, "File is currently locked by another process. {}", msg))
+        },
+        AccessResult::Empty => { Ok(Vec::new()) },
+        AccessResult::Ready => {
+            let content = std::fs::read_to_string(path).map_err(|e| failure!(verbosity, e))?;
+            let pairs = content.lines()
+                .filter_map(is_data_line) // Use the DRY helper
+                .map(|(n, v)| (n.to_string(), v.to_string()))
+                .collect();
+
+            Ok(pairs)
+        },
     }
-    let content = std::fs::read_to_string(path).map_err(|e| failure!(verbosity, e))?;
-
-    let pairs = content.lines()
-        .filter_map(is_data_line) // Use the DRY helper
-        .map(|(n, v)| (n.to_string(), v.to_string()))
-        .collect();
-
-    Ok(pairs)
 }
 
 pub fn get_editor_preference(verbosity: &Verbosity, editor: &Option<String>) -> BinaryProfile {
@@ -2265,54 +2296,64 @@ pub fn update_disk_file(verbosity: &Verbosity, name: &str, value: &str, path: &P
     // 4. ATOMIC SWAP
     // If the destination exists, rename will overwrite it on Windows 10/11
     trace!("path={:?}, tpath={:?}", path, tmp_path);
-    if path.exists() && !is_file_accessible(path) {
-        return Err(failure!(verbosity, ErrorCode::AccessDenied, "Cannot swap: Destination file is locked."));
-    }
-    if let Err(e) = fs::rename(&tmp_path, path) {
-        let _ = fs::remove_file(&tmp_path);
-        return Err(failure!(verbosity, e).into());
-    }
 
-    Ok(())
+    match verify_read_readiness(&PathBuf::from(&path)) {
+        AccessResult::Blocked(msg) => {
+            Err(failure!(verbosity, ErrorCode::AccessDenied, "Cannot swap: Destination file is locked. {}", msg))
+        },
+        AccessResult::Empty | AccessResult::Ready  => {
+            if let Err(e) = fs::rename(&tmp_path, path) {
+                let _ = fs::remove_file(&tmp_path);
+                Err(failure!(verbosity, e).into())
+            } else {
+              Ok(())
+            }
+        },
+    }
 }
 
 pub fn parse_macro_file(path: &Path, verbosity: &Verbosity) -> Result<Vec<(String, String)>, Box<dyn std::error::Error>> {
-    if !is_file_accessible(path) {
-        return Err(failure!(verbosity, ErrorCode::AccessDenied, "Lock detected during parse."));
+    match verify_read_readiness(&PathBuf::from(&path)) {
+        AccessResult::Blocked(msg) => {
+            Err(failure!(verbosity, ErrorCode::AccessDenied, "Lock detected during parse. {}", msg))
+        },
+        AccessResult::Empty => { Ok(Vec::new()) },
+        AccessResult::Ready => {
+            let content = fs::read_to_string(path).map_err(|e| failure!(verbosity, e))?;
+            let pairs = content.lines()
+                .filter_map(is_data_line)
+                .filter(|(n, _)| is_valid_name(n)) // Firewall: Drops anything not starting with alpha/underscore
+                .map(|(n, v)| (n.to_string(), v.to_string())) // No more .trim() here!
+                .collect();
+            Ok(pairs)
+        },
     }
-    let content = fs::read_to_string(path).map_err(|e| failure!(verbosity, e))?;
-
-    let pairs = content.lines()
-        .filter_map(is_data_line)
-        .filter(|(n, _)| is_valid_name(n)) // Firewall: Drops anything not starting with alpha/underscore
-        .map(|(n, v)| (n.to_string(), v.to_string())) // No more .trim() here!
-        .collect();
-
-    Ok(pairs)
 }
 
 pub fn query_alias_file(name: &str, path: &Path, verbosity: &Verbosity) -> Result<Vec<String>, Box<dyn std::error::Error>> {
-    if !is_file_accessible(path) {
-        return Ok(vec![format!("Access denied: {} is currently busy.", name)]);
+    match verify_read_readiness(&PathBuf::from(&path)) {
+        AccessResult::Blocked(msg) => {
+            Ok(vec![format!("Access denied: {} is currently busy. {}", name, msg)])
+        },
+        AccessResult::Empty => { Ok(Vec::new()) },
+        AccessResult::Ready => {
+            let mut results = Vec::new();
+            let search = format!("{}=", name.to_lowercase());
+            // Read the file (The Source of Truth)
+            let content = std::fs::read_to_string(path).map_err(|e| failure!(verbosity, e))?;
+            let found = content
+                .lines()
+                .find(|line| line.to_lowercase().starts_with(&search));
+            if let Some(line) = found {
+                results.push(line.to_string());
+            } else if !verbosity.is_silent() {
+                // Only push the "Not Known" message if we aren't in Silent/DataOnly mode
+                results.push(format!("{} is not a known alias in the config file.", name));
+            }
+            Ok(results)
+        },
     }
-    let mut results = Vec::new();
-    let search = format!("{}=", name.to_lowercase());
 
-    // Read the file (The Source of Truth)
-    let content = std::fs::read_to_string(path).map_err(|e| failure!(verbosity, e))?;
-
-    let found = content
-        .lines()
-        .find(|line| line.to_lowercase().starts_with(&search));
-
-    if let Some(line) = found {
-        results.push(line.to_string());
-    } else if !verbosity.is_silent() {
-        // Only push the "Not Known" message if we aren't in Silent/DataOnly mode
-        results.push(format!("{} is not a known alias in the config file.", name));
-    }
-
-    Ok(results)
 }
 
 pub fn parse_alias_line(line: &str) -> Option<(String, String)> {
@@ -2339,18 +2380,6 @@ pub fn parse_alias_line(line: &str) -> Option<(String, String)> {
 
     if name.is_empty() { return None; }
     Some((name, value))
-}
-
-pub fn timeout_guard<F, R>(timeout: Duration, f: F) -> Option<R>
-where
-    F: FnOnce() -> R + Send + 'static,
-    R: Send + 'static,
-{
-    let (tx, rx) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        let _ = tx.send(f());
-    });
-    rx.recv_timeout(timeout).ok()
 }
 
 pub fn calculate_new_file_state(original_content: &str, name: &str, value: &str) -> String {
@@ -2392,31 +2421,27 @@ pub fn identify_binary(_verbosity: &Verbosity, path: &Path) -> io::Result<Binary
         subsystem: BinarySubsystem::Cui, // Default
         is_32bit: false,
     };
-
-    // 2. The Gatekeeper (Retry logic/Accessibility)
-    if !is_file_accessible(path) {
-        profile.subsystem = BinarySubsystem::Unavail;
-        return Ok(profile);
-    }
-
-    // 3. Consolidated Triage
-    if let Some(ext_os) = path.extension() {
-        let ext = ext_with_dot(ext_os);
-        if is_script_extension(&ext) {
-            // Only short-circuit if it's NOT a binary container
-            if ext != ".exe" && ext != ".com" {
-                profile.subsystem = BinarySubsystem::Script;
-                return Ok(profile);
+    match verify_read_readiness(&PathBuf::from(&path)) {
+        AccessResult::Blocked(_msg) => {
+            profile.subsystem = BinarySubsystem::Unavail;
+        },
+        AccessResult::Empty | AccessResult::Ready => {
+            if let Some(ext_os) = path.extension() {
+                let ext = ext_with_dot(ext_os);
+                if is_script_extension(&ext) {
+                    // Only short-circuit if it's NOT a binary container
+                    if ext != ".exe" && ext != ".com" {
+                        profile.subsystem = BinarySubsystem::Script;
+                        return Ok(profile);
+                    }
+                }
             }
-        }
+            if let Ok((sub, is_32)) = peek_pe_metadata(path) {
+                profile.subsystem = sub;
+                profile.is_32bit = is_32;
+            }
+        },
     }
-
-    // 4. Delegate to the Deep Peeker (Only for binaries)
-    if let Ok((sub, is_32)) = peek_pe_metadata(path) {
-        profile.subsystem = sub;
-        profile.is_32bit = is_32;
-    }
-
     Ok(profile)
 }
 
@@ -2485,116 +2510,6 @@ pub fn peek_pe_metadata(path: &Path) -> io::Result<(BinarySubsystem, bool)> {
     Ok((subsystem, is_32bit))
 }
 
-#[named]
-pub fn is_drive_responsive(path: &Path, timeout: Duration) -> bool {
-    let path_buf = path.to_path_buf();
-    trace!("[DRIVE_CHECK] Starting guard for: {:?}", path_buf);
-
-    let result = match timeout_guard(timeout, move || {
-        let meta = std::fs::metadata(&path_buf);
-        let exists = meta.is_ok();
-        trace!("  [GUARD_CLOSURE] Metadata result for {:?}: exists={}", path_buf, exists);
-        meta.ok().map(|_| ())
-    }) {
-        Some(inner_opt) => {
-            let success = inner_opt.is_some();
-            trace!("  [DRIVE_CHECK] Guard returned in time. Path viable: {}", success);
-            success
-        }
-        None => {
-            trace!("  [DRIVE_CHECK] !! TIMEOUT !! Drive unresponsive");
-            false
-        }
-    };
-
-    trace!("[DRIVE_CHECK] Final verdict is {}", result);
-    result
-}
-
-fn is_path_viable(path: &Path) -> bool {
-    // 1. First Check: Is the hardware/OS actually responding for this path?
-    // Use your 50ms timeout guard to prevent hangs and catch locks.
-    if !is_drive_responsive(path, PATH_RESPONSIVENESS_THRESHOLD) {
-        return false;
-    }
-
-    // 2. Second Check: Is the file state "healthy"?
-    // Now we know the drive is awake and the file isn't hard-locked.
-    is_path_healthy(path, MAX_ALIAS_FILE_SIZE)
-}
-#[named]
-pub fn can_path_exist(path: &Path) -> bool {
-    let dir_to_check = match path.parent().filter(|p| !p.as_os_str().is_empty()) {
-        Some(p) => p.to_path_buf(),
-        None => PathBuf::from("."),
-    };
-    trace!("CPE dir to check is now {:?}", dir_to_check);
-    // Flatten the Option<Option<()>>
-    timeout_guard(PATH_RESPONSIVENESS_THRESHOLD, move || {
-        if !dir_to_check.exists() { return None; }
-        std::fs::metadata(&dir_to_check).ok().map(|_| ())
-    }).and_then(|inner| inner).is_some() // Use and_then to reach the real answer
-}
-#[named]
-pub fn resolve_viable_path(path: &PathBuf) -> Option<PathBuf> {
-    if is_viable_path(path) {
-        let clean_str = path.canonicalize()
-            .map(|p| normalize_path(p))
-            .unwrap_or_else(|_| normalize_path(path.clone()));
-        trace!("Resolved to {:?}", clean_str);
-        Some(PathBuf::from(clean_str))
-    } else {
-        trace!("Didn't resolve.");
-        None
-    }
-}
-#[named]
-fn is_viable_path(path: &Path) -> bool {
-    // 1. Force Canonicalization
-    // This turns short-names into long-names and validates the route
-    let canonical = match path.canonicalize() {
-        Ok(p) => p,
-        Err(_) => {
-            // If it doesn't exist, we can't canonicalize yet.
-            // Fall back to the "Can" check for new/mock files.
-            trace!("can't canonize {:?}", path);
-            return !path.exists() && can_path_exist(path);
-        }
-    };
-    trace!("canonized to {:?}", canonical);
-    // 2. If it exists and is canonical, run the Harsh check
-    if canonical.exists() {
-        is_file_accessible(&canonical)
-    } else {
-        can_path_exist(&canonical)
-    }
-}
-
-pub fn is_file_accessible(path: &Path) -> bool {
-    let mut retries = 3;
-
-    while retries > 0 {
-        if !is_path_viable(path) { retries -= 1; continue; }
-        // Attempt to open the file with read permissions
-        match std::fs::OpenOptions::new().read(true).open(path) {
-            Ok(_) => return true, // File is free and accessible
-            Err(e) => {
-                match e.raw_os_error() {
-                    Some(32) => { // ERROR_SHARING_VIOLATION
-                        retries -= 1;
-                        if retries > 0 {
-                            sleep(PATH_RESPONSIVENESS_THRESHOLD);
-                            continue;
-                        }
-                    }
-                    _ => return false, // Path is missing or hard permission error
-                }
-            }
-        }
-    }
-    false
-}
-
 pub fn random_num_bounded(limit: usize) -> usize {
     if limit == 0 { return 0 };
 
@@ -2655,4 +2570,186 @@ fn get_alias_exe_nofail(verbosity: &Verbosity) -> String {
         }
     }
 }
+
+//////////////////////////////////////////////////////
+////
+//// --- File Accessibility Helpers---
+////
+//////////////////////////////////////////////////////
+pub fn verify_read_readiness(path: &Path) -> AccessResult {
+    match check_path_integrity(path) {
+        PathIntegrity::Unresponsive => AccessResult::Blocked("Drive unresponsive".to_string()),
+        PathIntegrity::Missing => AccessResult::Empty,
+        PathIntegrity::Healthy => {
+            if is_file_accessible(path) {
+                AccessResult::Ready
+            } else {
+                AccessResult::Blocked("File locked by another process".to_string())
+            }
+        }
+    }
+}
+
+pub fn check_path_integrity(path: &Path) -> PathIntegrity {
+    // 1. Check drive responsiveness first (your 50ms guard)
+    if !is_drive_responsive(path, PATH_RESPONSIVENESS_THRESHOLD) {
+        return PathIntegrity::Unresponsive;
+    }
+
+    // 2. Drive is alive, check health/existence
+    let meta = match path.metadata() {
+        Ok(m) => m,
+        Err(_) => return PathIntegrity::Missing, // Responsive but file missing
+    };
+
+    if !meta.is_file() || meta.len() > MAX_ALIAS_FILE_SIZE as u64 {
+        return PathIntegrity::Unresponsive; // Logic/State health failure
+    }
+
+    PathIntegrity::Healthy
+}
+
+pub fn is_file_accessible(path: &Path) -> bool {
+    let mut retries = 3;
+
+    while retries > 0 {
+        if !is_path_viable(path) { retries -= 1; continue; }
+        // Attempt to open the file with read permissions
+        match std::fs::OpenOptions::new().read(true).open(path) {
+            Ok(_) => return true, // File is free and accessible
+            Err(e) => {
+                match e.raw_os_error() {
+                    Some(32) => { // ERROR_SHARING_VIOLATION
+                        retries -= 1;
+                        if retries > 0 {
+                            sleep(PATH_RESPONSIVENESS_THRESHOLD);
+                            continue;
+                        }
+                    }
+                    _ => return false, // Path is missing or hard permission error
+                }
+            }
+        }
+    }
+    false
+}
+
+#[named]
+pub fn is_drive_responsive(path: &Path, timeout: Duration) -> bool {
+    let path_buf = path.to_path_buf();
+    trace!("[DRIVE_CHECK] Starting guard for: {:?}", path_buf);
+
+    let result = match timeout_guard(timeout, move || {
+        let meta = std::fs::metadata(&path_buf);
+        let exists = meta.is_ok();
+        trace!("  [GUARD_CLOSURE] Metadata result for {:?}: exists={}", path_buf, exists);
+        meta.ok().map(|_| ())
+    }) {
+        Some(inner_opt) => {
+            let success = inner_opt.is_some();
+            trace!("  [DRIVE_CHECK] Guard returned in time. Path viable: {}", success);
+            success
+        }
+        None => {
+            trace!("  [DRIVE_CHECK] !! TIMEOUT !! Drive unresponsive");
+            false
+        }
+    };
+
+    trace!("[DRIVE_CHECK] Final verdict is {}", result);
+    result
+}
+
+#[named]
+fn is_viable_path(path: &Path) -> bool {
+    // 1. Force Canonicalization
+    // This turns short-names into long-names and validates the route
+    let canonical = match path.canonicalize() {
+        Ok(p) => p,
+        Err(_) => {
+            // If it doesn't exist, we can't canonicalize yet.
+            // Fall back to the "Can" check for new/mock files.
+            trace!("can't canonize {:?}", path);
+            return !path.exists() && can_path_exist(path);
+        }
+    };
+    trace!("canonized to {:?}", canonical);
+    // 2. If it exists and is canonical, run the Harsh check
+    if canonical.exists() {
+        is_file_accessible(&canonical)
+    } else {
+        can_path_exist(&canonical)
+    }
+}
+
+
+fn is_path_viable(path: &Path) -> bool {
+    // 1. First Check: Is the hardware/OS actually responding for this path?
+    // Use your 50ms timeout guard to prevent hangs and catch locks.
+    if !is_drive_responsive(path, PATH_RESPONSIVENESS_THRESHOLD) {
+        return false;
+    }
+
+    // 2. Second Check: Is the file state "healthy"?
+    // Now we know the drive is awake and the file isn't hard-locked.
+    is_path_healthy(path, MAX_ALIAS_FILE_SIZE)
+}
+
+pub fn timeout_guard<F, R>(timeout: Duration, f: F) -> Option<R>
+where
+    F: FnOnce() -> R + Send + 'static,
+    R: Send + 'static,
+{
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(f());
+    });
+    rx.recv_timeout(timeout).ok()
+}
+
+pub fn is_path_healthy(path: &Path, threshold: usize) -> bool {
+    let meta = match path.metadata() {
+        Ok(m) => m,
+        Err(_) => return false,
+    };
+    if !meta.is_file() {
+        return false;
+    }
+    if meta.len() > threshold as u64 {
+        return false;
+    }
+
+    true
+}
+
+#[named]
+pub fn can_path_exist(path: &Path) -> bool {
+    let dir_to_check = match path.parent().filter(|p| !p.as_os_str().is_empty()) {
+        Some(p) => p.to_path_buf(),
+        None => PathBuf::from("."),
+    };
+    trace!("CPE dir to check is now {:?}", dir_to_check);
+    // Flatten the Option<Option<()>>
+    timeout_guard(PATH_RESPONSIVENESS_THRESHOLD, move || {
+        if !dir_to_check.exists() { return None; }
+        std::fs::metadata(&dir_to_check).ok().map(|_| ())
+    }).and_then(|inner| inner).is_some() // Use and_then to reach the real answer
+}
+#[named]
+
+pub fn resolve_viable_path(path: &PathBuf) -> Option<PathBuf> {
+    if is_viable_path(path) {
+        let clean_str = path.canonicalize()
+            .map(|p| normalize_path(p))
+            .unwrap_or_else(|_| normalize_path(path.clone()));
+        trace!("Resolved to {:?}", clean_str);
+        Some(PathBuf::from(clean_str))
+    } else {
+        trace!("Didn't resolve.");
+        None
+    }
+}
+
+
+
 

@@ -74,6 +74,7 @@ impl AliasProvider for MockProvider {
 // =========================================================
 #[cfg(test)]
 mod argument_tests {
+    use std::path::PathBuf;
     use super::*;
     //    use std::path::PathBuf;
 
@@ -263,7 +264,7 @@ mod argument_tests {
 
     #[test]
     fn test_payload_with_persistence_flags() {
-        let args = vec!["alias".into(), "--temp".into(), "--force".into(), "tmp=echo 1".into()];
+        let args = vec!["alias".into(), "--temp".into(), "--case".into(), "tmp=echo 1".into()];
         let (mut queue, _) = parse_arguments(&args);
 
         if let AliasAction::Set(opts) = queue.pull().unwrap().action {
@@ -359,6 +360,88 @@ mod argument_tests {
         let args = vec!["alias".into(), "--reload".into(), "--setup".into()];
         let (_, voice) = parse_arguments(&args);
         assert!(voice.in_setup);
+    }
+
+    #[test]
+    fn test_all_variants_symmetry() {
+        let test_cases = vec![
+            // Standard Flags
+            ("--help", AliasAction::Help),
+            ("--reload", AliasAction::Reload),
+            ("--setup", AliasAction::Setup),
+            ("--clear", AliasAction::Clear),
+            ("--which", AliasAction::Which),
+            ("--file", AliasAction::File),
+            ("--startup", AliasAction::Startup),
+            ("--temp", AliasAction::Temp),
+
+            // New Symmetric Toggles
+            ("--case", AliasAction::Case),
+            ("--no-case", AliasAction::NoCase),
+            ("--quiet", AliasAction::Quiet),
+            ("--no-quiet", AliasAction::NoQuiet),
+            ("--icons", AliasAction::Icons),
+            ("--no-icons", AliasAction::NoIcons),
+            ("--tips", AliasAction::Tips),
+            ("--no-tips", AliasAction::NoTips),
+
+            // Key=Value (Ensure FromStr and Display match)
+            ("--remove test", AliasAction::Remove(SetOptions::involatile("test".to_string(), false))),
+            ("--unalias test", AliasAction::Unalias(SetOptions::volatile("test".to_string(), false))),
+            ("--edalias=notepad", AliasAction::Edit(Some("notepad".to_string()))),
+        ];
+
+        for (input, expected) in test_cases {
+            // 1. Test FromStr (Input -> Action)
+            let action: AliasAction = input.parse().expect("Should parse");
+            assert_eq!(action, expected, "Parsing mismatch for {}", input);
+
+            // 2. Test Symmetry (Action -> Output string)
+            // Note: Using Display or to_cli_args should now result in the same string
+            let output = format!("{}", action);
+            assert_eq!(input, output, "Symmetry broken: {} became {}", input, output);
+        }
+    }
+
+    #[test]
+    fn test_set_alias_with_case() {
+        let verbosity = Verbosity::normal();
+        let test_path = PathBuf::from("test_aliases.txt");
+
+        // 1. Test Case-Sensitive Set (The new --case)
+        let opts_case = SetOptions {
+            name: "GIT".to_string(), // Passed as owned String
+            value: "git status".to_string(),
+            volatile: false,
+            force_case: true, // The renamed field
+        };
+
+        // Construct the task
+        let task = Task {
+            action: AliasAction::Set(opts_case),
+            path: test_path.clone(),
+        };
+
+        // Dispatch using your Provider (e.g., Win32Provider or MockProvider)
+        // This verifies the renamed logic flows through the executor
+        let result = dispatch::<MockProvider>(task, &verbosity);
+        assert!(result.is_ok());
+
+        // 2. Test Case-Insensitive Set (The new --no-case)
+        let opts_no_case = SetOptions {
+            name: "ls".to_string(),
+            value: "ls -F".to_string(),
+            volatile: false,
+            force_case: false,
+        };
+
+        let task_no_case = Task {
+            action: AliasAction::Set(opts_no_case),
+            path: test_path,
+        };
+
+        let result_no_case = dispatch::<MockProvider>(task_no_case, &verbosity);
+        assert!(result_no_case.is_ok());
     }
 }
 #[cfg(test)]
@@ -508,10 +591,10 @@ mod parse_and_action {
     #[test]
     fn t16_temp_flag() { if let AliasAction::Set(o) = parse_arguments(&to_args(vec!["alias", "--temp", "x=y"])).0.pull().unwrap().action { assert!(o.volatile); } else { panic!(); } }
     #[test]
-    fn t17_force_flag() { if let AliasAction::Set(o) = parse_arguments(&to_args(vec!["alias", "--force", "x=y"])).0.pull().unwrap().action { assert!(o.force_case); } else { panic!(); } }
+    fn t17_force_flag() { if let AliasAction::Set(o) = parse_arguments(&to_args(vec!["alias", "--case", "x=y"])).0.pull().unwrap().action { assert!(o.force_case); } else { panic!(); } }
     #[test]
     fn t18_mixed_flags() {
-        if let AliasAction::Set(o) = parse_arguments(&to_args(vec!["alias", "--temp", "--force", "x=y"])).0.pull().unwrap().action { assert!(o.volatile && o.force_case); } else { panic!(); }
+        if let AliasAction::Set(o) = parse_arguments(&to_args(vec!["alias", "--temp", "--case", "x=y"])).0.pull().unwrap().action { assert!(o.volatile && o.force_case); } else { panic!(); }
     }
     #[test]
     fn t19_short_flag_safety() { assert_eq!(parse_arguments(&to_args(vec!["alias", "-e"])).0.pull().unwrap().action, AliasAction::Invalid); }
@@ -613,8 +696,8 @@ mod round_trip_tests {
             AliasAction::Which,
             AliasAction::Startup,
             AliasAction::Temp,
-            AliasAction::Force,
-            AliasAction::NoForce,  // New
+            AliasAction::Case,
+            AliasAction::NoCase,  // New
             AliasAction::Quiet,
             AliasAction::NoQuiet,  // New
             AliasAction::Icons,
@@ -633,46 +716,6 @@ mod round_trip_tests {
             let parsed: AliasAction = cli.parse().unwrap();
             assert_eq!(original, parsed, "Round-trip failed for: {}", cli);
         }
-    }
-}
-#[test]
-fn test_all_variants_symmetry() {
-    let test_cases = vec![
-        // Standard Flags
-        ("--help", AliasAction::Help),
-        ("--reload", AliasAction::Reload),
-        ("--setup", AliasAction::Setup),
-        ("--clear", AliasAction::Clear),
-        ("--which", AliasAction::Which),
-        ("--file", AliasAction::File),
-        ("--startup", AliasAction::Startup),
-        ("--temp", AliasAction::Temp),
-
-        // New Symmetric Toggles
-        ("--force", AliasAction::Force),
-        ("--no-force", AliasAction::NoForce),
-        ("--quiet", AliasAction::Quiet),
-        ("--no-quiet", AliasAction::NoQuiet),
-        ("--icons", AliasAction::Icons),
-        ("--no-icons", AliasAction::NoIcons),
-        ("--tips", AliasAction::Tips),
-        ("--no-tips", AliasAction::NoTips),
-
-        // Key=Value (Ensure FromStr and Display match)
-        ("--remove test", AliasAction::Remove(SetOptions::involatile("test".to_string(), false))),
-        ("--unalias test", AliasAction::Unalias(SetOptions::volatile("test".to_string(), false))),
-        ("--edalias=notepad", AliasAction::Edit(Some("notepad".to_string()))),
-    ];
-
-    for (input, expected) in test_cases {
-        // 1. Test FromStr (Input -> Action)
-        let action: AliasAction = input.parse().expect("Should parse");
-        assert_eq!(action, expected, "Parsing mismatch for {}", input);
-
-        // 2. Test Symmetry (Action -> Output string)
-        // Note: Using Display or to_cli_args should now result in the same string
-        let output = format!("{}", action);
-        assert_eq!(input, output, "Symmetry broken: {} became {}", input, output);
     }
 }
 
@@ -822,7 +865,7 @@ mod data_and_audit {
 
     #[test]
     fn t59_int_case() {
-        let (mut q, _) = parse_arguments(&vec!["alias".into(), "--force".into(), "Ñ=x".into()]);
+        let (mut q, _) = parse_arguments(&vec!["alias".into(), "--case".into(), "Ñ=x".into()]);
         if let AliasAction::Set(o) = q.pull().unwrap().action {
             assert!(o.force_case);
             assert_eq!(o.name, "Ñ");
