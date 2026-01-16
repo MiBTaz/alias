@@ -4,19 +4,17 @@ name = "alias_lib"
 version = "0.8.0"
 edition = "2024"
 
-[dev-dependencies]
-# This ensures alias_nuke is built before any lib tests run
-alias_nuke = { path = "../alias_nuke" }
-serial_test = "3.1.1"
-ctor = "0.6.3"
-lazy_static = "1.5.0"
-
 [dependencies]
-tempfile = "3.24.0"
-shlex = "1.3.0"
-serial_test = "3.2.0"
-function_name = "0.3.0"
+tempfile = { workspace = true }
+shlex = { workspace = true }
+serial_test = { workspace = true }
+function_name = { workspace = true }
 
+[dev-dependencies]
+alias_nuke = { workspace = true }
+serial_test = { workspace = true }
+ctor = { workspace = true }
+lazy_static = { workspace = true }
 
 [features]
-test-utils = []
+test_utils = []

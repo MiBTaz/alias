@@ -6,6 +6,11 @@ use std::path::Path;
 use std::process::Command;
 use std::time::Duration;
 use alias_lib::*;
+#[allow(unused_imports)]
+#[cfg(debug_assertions)]
+use function_name::named;
+
+extern crate alias_lib;
 
 pub struct WrapperLibraryInterface;
 
@@ -82,7 +87,8 @@ impl alias_lib::AliasProvider for WrapperLibraryInterface {
     }
 
     // ADDED: Missing trait method to match Win32
-    fn reload_full(path: &Path, verbosity: &Verbosity) -> Result<(), Box<dyn std::error::Error>> {
+    fn reload_full(verbosity: &Verbosity, path: &Path, clear: bool) -> Result<(), Box<dyn std::error::Error>> {
+        if clear { Self::purge_ram_macros(verbosity)?; }
         Self::raw_reload_from_file(verbosity, path)?;
         whisper!(verbosity, AliasIcon::Success, "Doskey Wrapper: Reloaded from {}", path.display());
         Ok(())
@@ -121,7 +127,6 @@ impl alias_lib::AliasProvider for WrapperLibraryInterface {
     }
 
     fn query_alias(name: &str, verbosity: &Verbosity) -> Vec<String> {
-        trace!("Querying for: {:?} (len: {})", name, name.len());
         let search_target = name.to_lowercase();
 
         // FIX: Handle the Result from get_all_aliases()
@@ -138,7 +143,6 @@ impl alias_lib::AliasProvider for WrapperLibraryInterface {
         for (n, v) in os_list {
             let clean_n = n.trim_matches('"').to_lowercase();
             if clean_n == search_target {
-                trace!("  MATCH FOUND!");
                 return vec![format!("{}={}", clean_n, v.trim_matches('"'))];
             }
         }
@@ -221,7 +225,7 @@ impl alias_lib::AliasProvider for WrapperLibraryInterface {
             env_opts: env::var(ENV_ALIAS_OPTS).unwrap_or_else(|_| "NOT SET".into()),
             file_exists: path.exists(),
             is_readonly: path.metadata().map(|m| m.permissions().readonly()).unwrap_or(false),
-            drive_responsive: is_drive_responsive(path, IO_RESPONSIVENESS_THRESHOLD),
+            drive_responsive: matches!( is_drive_responsive(path, IO_RESPONSIVENESS_THRESHOLD), AccessResult::Ready | AccessResult::Empty ),
             registry_status: check_registry_wrapper(),
             api_status: Some("SPAWNER (doskey.exe)".into()),
         };

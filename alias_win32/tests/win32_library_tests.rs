@@ -1,13 +1,12 @@
 // alias_win32/tests/win32_library_tests.rs
 
-use std::path::Path;
 #[allow(unused_imports)]
 use alias_lib::*;
 use alias_win32::Win32LibraryInterface as P;
 
 #[cfg(test)]
 #[ctor::ctor]
-fn init() {
+fn in32_library_tests() {
     unsafe {
         std::env::remove_var("ALIAS_FILE");
         std::env::remove_var("ALIAS_OPTS");

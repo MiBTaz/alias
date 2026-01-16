@@ -6,14 +6,21 @@ use serial_test::serial;
 use alias_lib::ShowFeature::{self, On, Off};
 use alias_wrapper::WrapperLibraryInterface as P;
 
+// shared code start
+extern crate alias_lib;
+
+#[path = "../../tests/shared_test_utils.rs"]
+mod test_suite_shared;
+#[allow(unused_imports)]
+use test_suite_shared::{MOCK_RAM, MockProvider, LAST_CALL, global_test_setup};
+
+// shared code end
+
+// use ctor to wipe env vars
 #[cfg(test)]
 #[ctor::ctor]
-fn init() {
-    unsafe {
-        std::env::remove_var("ALIAS_FILE");
-        std::env::remove_var("ALIAS_OPTS");
-        std::env::remove_var("ALIAS_PATH");
-    }
+fn init_wrapper_local() {
+    global_test_setup();
 }
 
 #[test]
@@ -60,7 +67,7 @@ fn test_wrapper_complex_chain() {
 #[serial]
 fn test_wrapper_setup_flow() {
     // FIX: Call via the Interface 'P'
-    P::install_autorun(&voice!(Silent, Off, Off)).expect("Wrapper install failed");
+    P::install_autorun(&voice!(Silent, Off, Off), "alias --startup").expect("Wrapper install failed");
 }
 
 // Helper kept local

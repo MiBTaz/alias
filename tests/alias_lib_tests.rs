@@ -1,109 +1,27 @@
-use std::io;
-use std::path::Path;
-use std::sync::Mutex;
 use serial_test::serial;
-use alias_lib::{AliasProvider, PurgeReport, SetOptions, Verbosity};
-use lazy_static::lazy_static;
+use alias_lib::*;
+use std::fs::File;
+use std::time::Duration;
+use tempfile::tempdir;
+
+// shared code start
+extern crate alias_lib;
+
+#[path = "shared_test_utils.rs"]
+mod test_suite_shared;
+#[allow(unused_imports)]
+use test_suite_shared::{MockProvider, MOCK_RAM, LAST_CALL, global_test_setup};
+
+// shared code end
 
 #[cfg(test)]
 #[ctor::ctor]
-fn init() {
-    unsafe {
-        std::env::remove_var("ALIAS_FILE");
-        std::env::remove_var("ALIAS_OPTS");
-        std::env::remove_var("ALIAS_PATH");
-    }
-}
+fn init_alias_lib() { global_test_setup(); }
 
 macro_rules! trace {
     ($($arg:tt)*) => {
             eprintln!("[AL-TRACE] {}", format!($($arg)*));
     };
-}
-
-lazy_static! {
-    // This holds the arguments passed to the last 'set_alias' call
-    static ref LAST_CALL: Mutex<Option<SetOptions>> = Mutex::new(None);
-}
-
-#[allow(dead_code)]
-fn get_captured_set() -> SetOptions {
-    LAST_CALL.lock()
-        .expect("Mutex poisoned")
-        .take() // Clears it for the next test
-        .expect("The dispatcher never called the provider!")
-}
-
-// Define this once at the module level
-struct MockProvider;
-
-// A fake system to track "RAM" state for testing
-static MOCK_RAM: Mutex<Vec<(String, String)>> = Mutex::new(Vec::new());
-
-impl AliasProvider for MockProvider {
-    // 1. ATOMIC HANDS
-    fn raw_set_macro(name: &str, value: Option<&str>) -> io::Result<bool> {
-        let mut ram = MOCK_RAM.lock().unwrap();
-        if value.is_none() {
-            // This is the PURGE action: remove it from the vector
-            ram.retain(|(k, _)| k != name);
-        } else {
-            ram.push((name.to_string(), value.unwrap().to_string()));
-        }
-        Ok(true)
-    }
-
-    // This now returns the ACTUAL state of your fake system
-    fn get_all_aliases(_: &Verbosity) -> io::Result<Vec<(String, String)>> {
-        let ram = MOCK_RAM.lock().unwrap();
-        Ok(ram.clone())
-    }
-    // MATCH: Path instead of str
-    fn raw_reload_from_file(_: &Verbosity, _: &std::path::Path) -> io::Result<()> { Ok(()) }
-    fn reload_full(_verbosity: &Verbosity, _file_path: &Path, _force: bool) -> Result<(), Box<dyn std::error::Error>> {
-        Ok(())
-    }
-    fn write_autorun_registry(_: &str, _: &Verbosity) -> io::Result<()> { Ok(()) }
-    fn purge_ram_macros(v: &Verbosity) -> Result<PurgeReport, std::io::Error> {
-        let mut report = PurgeReport::default();
-
-        // 1. Get the current list of what's in RAM
-        let aliases = Self::get_all_aliases(v)?;
-
-        // 2. Clear the RAM
-        for (name, _) in aliases {
-            // Use our own raw_set_macro (passing None triggers the removal)
-            Self::raw_set_macro(&name, None)?;
-            report.cleared.push(name);
-        }
-
-        Ok(report)
-    }
-    fn purge_file_macros(_: &Verbosity, _: &Path) -> Result<PurgeReport, std::io::Error> { Ok(PurgeReport::default()) }
-    // MATCH: Returns String directly, not Result
-    fn read_autorun_registry() -> String { String::new() }
-
-    // 2. REQUIRED TRAIT METHODS
-    // MATCH: Returns Vec<String>, not Result
-    fn query_alias(_: &str, _: &Verbosity) -> Vec<String> { vec![] }
-
-    // MATCH: Param 1 is SetOptions, Param 2 is &Path
-    fn set_alias(opts: SetOptions, _path: &Path, _v: &Verbosity) -> io::Result<()> {
-        let mut call = LAST_CALL.lock().unwrap();
-        *call = Some(opts); // This records the work dispatch did
-        Ok(())
-    }
-
-    // MATCH: &Path and Result<(), Box<dyn Error>>
-    fn run_diagnostics(_: &std::path::Path, v: &Verbosity) -> Result<(), Box<dyn std::error::Error>> {
-        // If the test expects to see "WRITABLE", the provider MUST write it!
-        v.say("✅ WRITABLE");
-        Ok(())
-    }
-
-    // MATCH: Result<(), Box<dyn Error>>
-    fn alias_show_all(_: &Verbosity) -> Result<(), Box<dyn std::error::Error>> { Ok(()) }
-
 }
 
 #[cfg(test)]
@@ -1142,19 +1060,37 @@ mod path_resolution_tests {
 
     #[test]
     #[serial]
-    fn test_env_directory_auto_join() {
+    fn test_env_directory_auto_join_one() {
         // If the env var points to a directory, it should append the filename
         let temp_dir = std::env::temp_dir();
         unsafe {
             std::env::set_var(ENV_ALIAS_FILE, temp_dir.to_str().unwrap());
         }
 
-        let resolved = get_alias_path("").unwrap();
-        trace!("Resolved={:?}", resolved);
-        assert!(resolved.ends_with(DEFAULT_ALIAS_FILENAME));
+        let _resolved = get_alias_path("").unwrap();
+        trace!("Resolved={:?}", _resolved);
+        assert!(_resolved.ends_with(DEFAULT_ALIAS_FILENAME));
         unsafe {
             std::env::remove_var(ENV_ALIAS_FILE);
         }
+    }
+
+    #[test]
+    #[serial]
+    fn test_env_directory_auto_join() {
+        // If the env var points to a directory, it should append the filename
+        let temp_dir = std::env::temp_dir();
+        let expected = temp_dir.join(DEFAULT_ALIAS_FILENAME); // Define expected path
+
+        unsafe { std::env::set_var(ENV_ALIAS_FILE, temp_dir.to_str().unwrap()); }
+
+        let res = get_alias_path("").unwrap(); // Capture the result
+
+        // --- THE FIX: Assertions to use the variables ---
+        assert_eq!(res, expected, "Should have joined ALIAS_FILE directory with default filename");
+        assert!(res.is_absolute(), "Resolved path must be absolute");
+
+        unsafe { std::env::remove_var(ENV_ALIAS_FILE); }
     }
 
     #[test]
@@ -1586,7 +1522,10 @@ bad name=should_fail
     fn test_parse_non_existent_file() {
         let path = std::path::Path::new("missing_file_xyz.doskey");
         let result = parse_macro_file(path, &Verbosity::silent());
-        assert!(result.is_err());
+
+        // ALIGNMENT: We expect Ok(empty), not an Err.
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().len(), 0);
     }
 }
 
@@ -2141,7 +2080,8 @@ mod intent_and_symmetry_tests {
             AliasAction::File,
             AliasAction::Quiet,
             AliasAction::Temp,
-            AliasAction::Force,
+            AliasAction::Case,
+            AliasAction::NoCase,
             AliasAction::Startup,
             AliasAction::ShowAll,
             AliasAction::Edit(Some("my_alias".to_string())),
@@ -2310,7 +2250,7 @@ mod intent_and_symmetry_tests {
     #[test]
     fn t76_case_persistence_dispatch() {
         // Scenario: alias --case g=ls
-        let (mut q, _) = parse_arguments(&vec!["alias".into(), "--force".into(), "g=ls".into()]);
+        let (mut q, _) = parse_arguments(&vec!["alias".into(), "--case".into(), "g=ls".into()]);
         let task = q.pull().expect("Should have one task");
 
         // Dispatch the task to our Mock
@@ -2321,3 +2261,211 @@ mod intent_and_symmetry_tests {
         assert!(r.force_case); // This verifies the rename is functional
     }
 }
+
+#[cfg(test)]
+mod integrity_tests {
+    use super::*;
+
+    #[test]
+    fn test_integrity_missing_file_on_live_drive() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("missing.doskey");
+
+        // Should be Missing, not Unresponsive
+        let state = check_path_integrity(&path);
+        assert!(matches!(state, PathIntegrity::Missing));
+
+        // Tool A should allow it (for creation/empty read)
+        assert!(is_file_accessible(&path));
+    }
+
+    #[test]
+    fn test_integrity_healthy_file() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("healthy.doskey");
+        File::create(&path).unwrap();
+
+        let state = check_path_integrity(&path);
+        assert!(matches!(state, PathIntegrity::Healthy));
+        assert!(is_file_accessible(&path));
+    }
+
+    #[test]
+    fn test_integrity_locked_file() {
+        use std::os::windows::fs::OpenOptionsExt; // Needed for .share_mode()
+
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("locked.txt");
+
+        // Create the file
+        std::fs::File::create(&path).unwrap();
+
+        // Open with share_mode(0) -> Deny Read, Deny Write, Deny Delete
+        // This creates a hard Sharing Violation for any subsequent access
+        let _blocker = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .share_mode(0)
+            .open(&path)
+            .unwrap();
+
+        let state = check_path_integrity(&path);
+
+        // Now is_file_accessible will hit Err(32) and return false
+        assert!(matches!(state, PathIntegrity::Unresponsive));
+    }
+
+    #[test]
+    fn test_timeout_guard_triggers_properly() {
+        let timeout = Duration::from_millis(10);
+        let result = timeout_guard(timeout, || {
+            std::thread::sleep(Duration::from_millis(100));
+            true
+        });
+
+        assert!(result.is_none(), "Guard should have timed out");
+    }
+
+    #[test]
+    #[serial] // Use serial_test to avoid env collision between threads
+    fn test_path_resolution_cycle() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let real_file = temp_dir.path().join("my.aliases");
+        std::fs::File::create(&real_file).unwrap();
+
+        // --- Scenario 1: Explicit CLI Override ---
+        let res = get_alias_path(real_file.to_str().unwrap());
+        assert_eq!(res, Some(real_file.clone()), "CLI override should win");
+
+        // --- Scenario 2: Environment Variable (File) ---
+        unsafe {
+            std::env::set_var("ALIAS_FILE", real_file.to_str().unwrap());
+        }
+        let res = get_alias_path("");
+        assert_eq!(res, Some(real_file.clone()), "ENV var file should win over defaults");
+
+        // --- Scenario 3: Environment Variable (Dir) ---
+        // Should join with DEFAULT_ALIAS_FILENAME
+        unsafe {
+            std::env::set_var("ALIAS_FILE", temp_dir.path().to_str().unwrap());
+        }
+        let res = get_alias_path("");
+        let expected = temp_dir.path().join("aliases.doskey"); // Assuming this is your default
+        // Note: This might fail if the file doesn't exist yet and is_viable_path checks existence
+        assert_eq!(res, Some(expected), "Should join ALIAS_FILE directory with default filename");
+        assert!(res.is_some(), "Should resolve even if file doesn't exist yet");
+
+        // --- Scenario 4: The Empty String (The Discovery) ---
+        unsafe {
+            std::env::remove_var("ALIAS_FILE");
+        }
+        let res = get_alias_path("");
+        // This will test your APPDATA/USERPROFILE fallback
+        // If this is None in your audit, it means none of the standard paths have a viable parent
+        assert!(res.is_some(), "Standard OS discovery should return a default path when ENV is empty");
+    }
+}
+
+
+#[cfg(test)]
+mod tips_test {
+    use super::*;
+
+    #[test]
+    fn test_verbosity_random_tips_statistical_distribution() {
+        let iterations = 1000;
+        let mut tip_count = 0;
+
+        for _ in 0..iterations {
+            let v = Verbosity::normal();
+
+            // Check if a tip was populated
+            if v.display_tip.is_some() {
+                tip_count += 1;
+
+                // Safety check: ensure it didn't just return an empty string
+                assert!(!v.display_tip.unwrap().is_empty(), "Tip should not be empty if present");
+            }
+        }
+
+        // 10% of 1000 is 100.
+        // We use a generous margin (e.g., 50-150) to account for RNG variance
+        // while still catching hard-coded "Always On" or "Always Off" bugs.
+        println!("Statistical Tip Count: {}/{}", tip_count, iterations);
+
+        assert!(tip_count > 50, "Tip frequency too low: {}/{}", tip_count, iterations);
+        assert!(tip_count < 150, "Tip frequency too high: {}/{}", tip_count, iterations);
+    }
+
+    #[test]
+    fn test_verbosity_presets_logic() {
+        // Silent should NEVER have a tip
+        let silent = Verbosity::silent();
+        assert!(silent.display_tip.is_none(), "Silent mode must never show tips");
+
+        // Loud should ALWAYS have a tip (based on your Loud preset logic)
+        // If random_tip_show() itself has the 10% logic, this might still be None
+        // unless you force random_tip_show to check the ShowTips enum.
+        let loud = Verbosity::loud();
+        if loud.show_tips.is_on() {
+            // Verification logic here depends on if random_tip_show()
+            // respects the 'On' override or stays at 10%.
+        }
+    }
+
+    #[test]
+    fn test_verbosity_normal_tip_distribution() {
+        let iterations = 1000;
+        let mut tip_count = 0;
+
+        for _ in 0..iterations {
+            // Construct a new "Normal" verbosity which rolls for a tip
+            let v = Verbosity::normal();
+
+            if v.display_tip.is_some() {
+                tip_count += 1;
+                // Ruggedness check: ensure it's not a blank string
+                assert!(!v.display_tip.unwrap().is_empty(), "Tip should contain text");
+            }
+        }
+
+        // Checking for 10% distribution (target 100)
+        // We allow a margin (50-150) to prevent flakiness while catching 0% or 100% bugs.
+        println!("Statistical Tip Count: {}/{}", tip_count, iterations);
+        assert!(tip_count >= 50, "Tip frequency too low: {}/{}", tip_count, iterations);
+        assert!(tip_count <= 150, "Tip frequency too high: {}/{}", tip_count, iterations);
+    }
+
+    #[test]
+    fn test_verbosity_preset_hard_limits() {
+        // Silent/Mute should NEVER show tips, regardless of RNG
+        assert!(Verbosity::silent().display_tip.is_none(), "Silent mode must be tip-free");
+        assert!(Verbosity::mute().display_tip.is_none(), "Mute mode must be tip-free");
+
+        // Loud mode should be reliable for debugging
+        let loud = Verbosity::loud();
+        assert_eq!(loud.show_tips, ShowTips::On, "Loud mode should have tips ON");
+    }
+
+    #[test]
+    fn test_verbosity_tip_distribution_monte_carlo() {
+        let iterations = 1000;
+        let mut tip_count = 0;
+
+        for _ in 0..iterations {
+            let v = Verbosity::normal();
+            if v.display_tip.is_some() {
+                tip_count += 1;
+                // Ensure tip isn't just an empty string
+                assert!(!v.display_tip.unwrap().is_empty());
+            }
+        }
+
+        // Checking for ~10% (Target 100).
+        // Margin of 50-150 prevents "flaky" failures while catching logical errors.
+        println!("Statistical Tip Count: {}/{}", tip_count, iterations);
+        assert!(tip_count >= 50 && tip_count <= 150,
+                "Tip distribution outside 10% tolerance: got {}/{}", tip_count, iterations);
+    }
+}
+

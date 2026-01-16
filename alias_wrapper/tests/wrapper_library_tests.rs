@@ -2,7 +2,7 @@
 
 #[cfg(test)]
 #[ctor::ctor]
-fn init() {
+fn wrapper_library_tests() {
     unsafe {
         std::env::remove_var("ALIAS_FILE");
         std::env::remove_var("ALIAS_OPTS");

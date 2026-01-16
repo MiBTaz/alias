@@ -3,14 +3,22 @@ use winreg::RegKey;
 #[allow(unused_imports)]
 use winreg::enums::HKEY_CURRENT_USER;
 
+#[path = "shared_test_utils.rs"]
+mod test_suite_shared;
+#[allow(unused_imports)]
+use test_suite_shared::{MockProvider, MOCK_RAM, LAST_CALL, global_test_setup};
+
+// shared code end
+
 #[cfg(test)]
 #[ctor::ctor]
-fn init() {
-    unsafe {
-        std::env::remove_var("ALIAS_FILE");
-        std::env::remove_var("ALIAS_OPTS");
-        std::env::remove_var("ALIAS_PATH");
-    }
+fn init_alias_lib() { global_test_setup(); }
+
+// use ctor to wipe env vars
+#[cfg(test)]
+#[ctor::ctor]
+fn init_cli_tests() {
+    global_test_setup();
 }
 
 #[test]
@@ -38,7 +46,7 @@ fn test_registry_append_logic() {
 #[serial]
 fn test_routine_setup_registration() {
     // Verifies the install_autorun branch in the provider
-    let _ = P::install_autorun(&Verbosity::silent());
+    let _ = P::install_autorun(&Verbosity::silent(), "alias --startup");
 }
 
 #[test]

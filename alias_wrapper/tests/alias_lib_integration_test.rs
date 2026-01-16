@@ -1,13 +1,22 @@
 // alias_wrapper/tests/alias_lib_integration_test.rs
+
+// shared code start
+extern crate alias_lib;
+
+#[path = "../../tests/shared_test_utils.rs"]
+mod test_suite_shared;
+#[allow(unused_imports)]
+use test_suite_shared::{MockProvider, MOCK_RAM, LAST_CALL, global_test_setup};
+#[allow(unused_imports)]
+use test_suite_shared::*;
+
+// shared code end
 #[cfg(test)]
 #[ctor::ctor]
-fn init() {
-    unsafe {
-        std::env::remove_var("ALIAS_FILE");
-        std::env::remove_var("ALIAS_OPTS");
-        std::env::remove_var("ALIAS_PATH");
-    }
+fn alias_lib_integration_test() {
+    global_test_setup();
 }
+
 
 // 1. Pull in the public API of the library
 #[allow(unused_imports)]

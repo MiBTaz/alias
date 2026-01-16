@@ -14,15 +14,19 @@ use alias_lib::*;
 use alias_lib::{REG_SUBKEY, REG_AUTORUN_KEY};
 extern crate alias_nuke;
 
+// shared code start
+extern crate alias_lib;
+
+#[path = "shared_test_utils.rs"]
+mod test_suite_shared;
+#[allow(unused_imports)]
+use test_suite_shared::{MockProvider, MOCK_RAM, LAST_CALL, global_test_setup};
+
+// shared code end
+
 #[cfg(test)]
 #[ctor::ctor]
-fn init() {
-    unsafe {
-        std::env::remove_var("ALIAS_FILE");
-        std::env::remove_var("ALIAS_OPTS");
-        std::env::remove_var("ALIAS_PATH");
-    }
-}
+fn init_alias_win32_wrapper() { global_test_setup(); }
 
 macro_rules! skip_if_wrapper {
     () => {
@@ -76,7 +80,7 @@ fn test_routine_diagnostics_safety() {
 fn test_routine_setup_registration() {
     // We test that the command executes. Result may be Err if no Admin,
     // but the logic path is exercised.
-    let _ = P::install_autorun(&voice!(Silent, ShowFeature::Off, ShowTips::Off));
+    let _ = P::install_autorun(&voice!(Silent, ShowFeature::Off, ShowTips::Off), "alias --startup");
 }
 
 #[test]
@@ -153,7 +157,7 @@ fn test_routine_reload_full() {
     fs::write(&path, "reload_key=reload_val\n").unwrap();
 
     // FIXED: Signature now requires Verbosity
-    P::reload_full(&path, &test_v()).expect("Reload failed");
+    P::reload_full(&test_v(), &path, true).expect("Reload failed");
 
     // FIXED: query_alias now requires Verbosity
     let results = P::query_alias("reload_key", &test_v());
@@ -174,7 +178,7 @@ fn test_routine_diagnostics() {
 #[serial]
 fn test_routine_install_autorun() {
     // FIXED: Passed test_v() instead of 'true'
-    let _ = P::install_autorun(&test_v());
+    let _ = P::install_autorun(&test_v(), "alias --startup");
 }
 
 #[test]
@@ -303,7 +307,7 @@ fn test_routine_reload_sync() {
     let _ = P::purge_ram_macros(&voice!(Silent, Off, Off));
 
     // FIX: Use trait method for reloading
-    P::reload_full(&path, &test_v()).expect("Reload failed");
+    P::reload_full(&test_v(), &path, true).expect("Reload failed");
 
     let q1 = P::query_alias("k1", &test_v());
     let q2 = P::query_alias("k2", &test_v());

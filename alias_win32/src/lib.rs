@@ -13,8 +13,10 @@ use std::time::Duration;
 use winreg::RegKey;
 use winreg::enums::HKEY_CURRENT_USER;
 pub use alias_lib::{REG_SUBKEY, REG_AUTORUN_KEY};
+#[allow(unused_imports)]
+#[cfg(debug_assertions)]
+use function_name::named;
 
-/// Helper to generate the silo name based on the environment.
 fn get_test_silo_name() -> String {
     if env::var("ALIAS_TEST_BUCKET").is_ok() || cfg!(test) {
         format!("alias_test_silo_{:?}", std::thread::current().id())
@@ -42,8 +44,6 @@ pub struct Win32LibraryInterface;
 
 impl AliasProvider for Win32LibraryInterface {
     fn raw_set_macro(name: &str, value: Option<&str>) -> io::Result<bool> {
-        trace!("ENTERING raw_set_macro: name='{}', has_value={}", name, value.is_some());
-
         // 1. NO MORE TRIMMING. Pass the name EXACTLY as it is.
         let n_wide: Vec<u16> = std::ffi::OsStr::new(name)
             .encode_wide().chain(Some(0)).collect();
@@ -221,29 +221,9 @@ impl AliasProvider for Win32LibraryInterface {
         Ok(report)
     }
 
-    fn purge_file_macros(verbosity: &Verbosity, path: &Path) -> io::Result<PurgeReport> {
-        let mut report = PurgeReport::default();
 
-        // 1. Read the file into memory
-        let content = std::fs::read_to_string(path)
-            .map_err(|e| io::Error::new(io::ErrorKind::NotFound, format!("Could not read alias file: {}", e)))?;
-
-        // 2. Iterate through every data line in the file
-        for line in content.lines() {
-            if let Some((name, _)) = is_data_line(line) {
-                // 3. Unset the alias from the Win32/OS RAM
-                // Passing None to raw_set_macro is the trigger to delete
-                if Self::raw_set_macro(name, None)? {
-                    report.cleared.push(name.to_string());
-                } else {
-                    report.failed.push((name.to_string(), 0));
-                }
-            }
-        }
-        Ok(report)
-    }
-
-    fn reload_full(path: &Path, verbosity: &Verbosity) -> Result<(), Box<dyn std::error::Error>> {
+    fn reload_full( verbosity: &Verbosity, path: &Path, clear: bool) -> Result<(), Box<dyn std::error::Error>> {
+        if clear { Self::purge_ram_macros(verbosity)?; }
         // 1. Add '?' to percolate the error and get the Vec
         // 2. Pass verbosity to match the new signature
         let macros = parse_macro_file(path, verbosity)
@@ -261,7 +241,6 @@ impl AliasProvider for Win32LibraryInterface {
     }
 
     fn query_alias(name: &str, verbosity: &Verbosity) -> Vec<String> {
-        trace!("query_alias entry for name: '{}'", name);
         let search_target = name.to_lowercase();
 
         let os_list = match Self::get_all_aliases(verbosity) {
@@ -308,7 +287,7 @@ impl AliasProvider for Win32LibraryInterface {
             env_opts: env::var(ENV_ALIAS_OPTS).unwrap_or_else(|_| "NOT SET".to_string()),
             file_exists: path.exists(),
             is_readonly: path.metadata().map(|m| m.permissions().readonly()).unwrap_or(false),
-            drive_responsive: is_drive_responsive(path, IO_RESPONSIVENESS_THRESHOLD),
+            drive_responsive: matches!(is_drive_responsive(path, IO_RESPONSIVENESS_THRESHOLD), AccessResult::Ready),
             registry_status: check_registry_native(),
             api_status: Some(if Self::is_api_responsive(IO_RESPONSIVENESS_THRESHOLD) { "CONNECTED (Win32 API)".to_string() } else { "FAILED".to_string() }),
         };

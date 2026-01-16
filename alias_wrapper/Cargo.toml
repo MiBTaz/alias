@@ -5,16 +5,18 @@ version = "0.5.1"
 edition = "2024"
 
 [dependencies]
-alias_lib = { path = "../alias_lib" }
-winreg = "0.55.0"
-tempfile = "3.24.0"
+alias_lib = { workspace = true }
+winreg = { workspace = true }
+tempfile = { workspace = true }
+function_name = { workspace = true }
 
 [dev-dependencies]
-serial_test = "3.1.1"
-alias_nuke = { path = "../alias_nuke" }
-assert_cmd = "2.0"
-ctor = "0.6.3"
-function_name = "0.3.0"
+alias_nuke = { workspace = true }
+serial_test = { workspace = true }
+assert_cmd = { workspace = true }
+ctor = { workspace = true }
+function_name = { workspace = true }
+lazy_static = { workspace = true }
 
 [features]
 test_utils = []

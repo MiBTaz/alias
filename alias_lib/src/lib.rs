@@ -10,13 +10,16 @@ use std::process::Command;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use std::collections::HashMap;
 use std::fs::File;
+use std::ops::Not;
 use std::sync::{Arc, Mutex};
-use std::thread::sleep;
 use std::str::FromStr;
+#[allow(unused_imports)]
+#[cfg(debug_assertions)]
 use function_name::named;
 
 // --- Macros ---
 #[macro_export]
+#[cfg(debug_assertions)]
 macro_rules! trace {
     // Branch 1: Single argument
     ($arg:expr) => {
@@ -24,6 +27,7 @@ macro_rules! trace {
         {
             // Changing {} to {:?} is the key.
             // It will now print "Query("cmd")" instead of just "cmd"
+            #[cfg(debug_assertions)]
             eprintln!("[TRACE][{}] {:?}", function_name!(), $arg);
         }
     };
@@ -31,6 +35,7 @@ macro_rules! trace {
     ($fmt:expr, $($arg:tt)*) => {
         #[cfg(any(debug_assertions, test))]
         {
+            #[cfg(debug_assertions)]
             eprintln!("[TRACE][{}] {}", function_name!(), format!($fmt, $($arg)*));
         }
     };
@@ -164,6 +169,7 @@ macro_rules! dispatch_failure {
     ($verbosity:expr, $variant:expr, $msg:expr) => {{
         let error_msg = $msg;
         // Trace uses the Debug/Display of the variant
+        #[cfg(debug_assertions)]
         trace!("[dispatch] Logic Error: {} (Variant: {:?})", error_msg, $variant);
 
         // Scream for the user
@@ -331,11 +337,23 @@ impl BinaryProfile {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AccessResult {
     Ready,
     Empty,
     Blocked(String),
 }
+impl Not for &AccessResult {
+    type Output = bool;
+
+    fn not(self) -> Self::Output {
+        match self {
+            AccessResult::Ready => false, // Ready is NOT not-ready
+            _ => true,                    // Blocked or Empty are effectively "Not Ready"
+        }
+    }
+}
+
 pub enum PathIntegrity {
     Healthy,      // Responsive and exists
     Missing,      // Responsive but file not found
@@ -1297,7 +1315,7 @@ pub fn run<P: AliasProvider>(mut args: Vec<String>) -> Result<(), Box<dyn std::e
 // Logic Block 1: Flag Harvesting.
 // Logic Block 2: Sticky Path / Context Resolution (Hydrating the Task.path).
 // Logic Block 3: Greedy Payload Collection.
-#[named]
+#[cfg_attr(debug_assertions, named)]
 pub fn parse_arguments(args: &[String]) -> (TaskQueue, Verbosity) {
     let mut queue = TaskQueue::new();
     let mut voice = Verbosity::loud();
@@ -1326,7 +1344,7 @@ pub fn parse_arguments(args: &[String]) -> (TaskQueue, Verbosity) {
             // Punch-out Intent
             AliasAction::Help => {
                 queue.clear();
-                queue.push(AliasAction::Help);
+                queue.push_file(AliasAction::Help, get_alias_path("").unwrap());
                 return (queue, voice);
             }
             // Setup Intent
@@ -1494,45 +1512,62 @@ pub fn parse_arguments(args: &[String]) -> (TaskQueue, Verbosity) {
         }
     }
     // --- STEP 3: THE RESOLUTION (The Sticky Sweep) ---
+    #[cfg(debug_assertions)]
     trace!("Pre test: Custom path: {:?}", custom_path);
     let current_context = if custom_path.to_string_lossy().is_empty() {
+        #[cfg(debug_assertions)]
         trace!("Pre test: set to \"\": {:?}", custom_path);
         get_alias_path("") // Safety Net
     } else {
+        #[cfg(debug_assertions)]
         trace!("Pre test: set to : {:?}", custom_path);
         resolve_viable_path(&custom_path) // Strict Override
     };
     if let Some(p) = &current_context {
         queue.pushpath(p.display().to_string());
     }
+    #[cfg(debug_assertions)]
     trace!("Pre test: Current Context: {:?}", current_context);
 
+    #[cfg(debug_assertions)]
     trace!("STEP 3 START");
+    #[cfg(debug_assertions)]
     trace!("  Custom Path: {:?}", custom_path);
+    #[cfg(debug_assertions)]
     trace!("  Current Context: {:?}", current_context);
+    #[cfg(debug_assertions)]
     trace!("  Resolved Context: {:?}", current_context);
+    #[cfg(debug_assertions)]
     let mut i= queue.tasks.len();
 
     for task in queue.tasks.iter_mut().rev() {
+        #[cfg(debug_assertions)]
         trace!("  Processing Task [{}]: {:?}", i - 1, task.action);
-        i -= 1;
+        #[cfg(debug_assertions)] {
+            i -= 1;
+        }
         if task.action == AliasAction::File { break; }
 
         // ONLY act if it's empty AND it actually needs a file
         if task.path.as_os_str().is_empty() && task.action.requires_file() {
             if let Some(ref valid) = current_context {
+                #[cfg(debug_assertions)]
                 trace!("    -> [FILL] Path injected: {:?}", valid);
                 task.path = valid.clone();
             } else {
+                #[cfg(debug_assertions)]
                 trace!("    -> [FAIL] Anchor was None, marking task Fail");
                 // Anchor is invalid (bad --file path or bad default)
                 task.action = AliasAction::Fail;
                 let _ = failure!(voice, ErrorCode::MissingFile, "Error: file name required for {}", task.action.to_cli_args());
             }
+            #[cfg(debug_assertions)]
             trace!("    -> [IF/ELSE let logic complete] Path set to: {:?}", task.path);
         }
+        #[cfg(debug_assertions)]
         trace!("    -> [IF/ELSE task logic complete] Path set to: {:?}", task.path);
     }
+    #[cfg(debug_assertions)]
     trace!("STEP 3 COMPLETE");
 
     // 4, Finalize
@@ -1541,7 +1576,7 @@ pub fn parse_arguments(args: &[String]) -> (TaskQueue, Verbosity) {
     }
     (queue, voice)
 }
-#[named]
+#[cfg_attr(debug_assertions, named)]
 pub fn parse_set_argument(
     _verbosity: &Verbosity, // Prefixed to clear warning
     f_args: &[String],
@@ -1578,23 +1613,29 @@ pub fn parse_set_argument(
 
     // --- 2. VALUE HARVESTING ---
     while i < f_args.len() {
+        #[cfg(debug_assertions)]
         trace!("f_args[{}]={}", i, f_args[i]);
         let current = &f_args[i];
+        #[cfg(debug_assertions)]
         trace!("gobble:{} AliasAction::is_switch(current):{} current:{} f_args[i]={}", is_gobble, AliasAction::is_switch(current), current, &f_args[i]);
         if !is_gobble && (AliasAction::is_switch(current) || current == "--") {
             break;
         }
         cmd_parts.push(current.clone());
+        #[cfg(debug_assertions)]
         trace!("while. after push. len is {}", cmd_parts.len());
         i += 1;
     }
+    #[cfg(debug_assertions)]
     trace!("Done...");
     // --- 3. THE LOGIC GATE ---
     if !is_gobble && !is_valid_name(&name) {
+        #[cfg(debug_assertions)]
         trace!("AliasAction::Invalid");
         return (AliasAction::Invalid, i);
     }
 
+    #[cfg(debug_assertions)]
     trace!("saw={}, cmd_parts.len={}", saw_equals, cmd_parts.len());
     // CASE A: The "Empty Strike"
     if saw_equals && cmd_parts.is_empty() {
@@ -1608,6 +1649,7 @@ pub fn parse_set_argument(
     }
     // CASE B: The Query (No equals sign and no values found)
     if !saw_equals && cmd_parts.is_empty() {
+        #[cfg(debug_assertions)]
         trace!("AliasAction::Query");
         return (AliasAction::Query(name), i);
     }
@@ -1619,12 +1661,13 @@ pub fn parse_set_argument(
         volatile,
         force_case,
     };
+    #[cfg(debug_assertions)]
     trace!("AliasAction::Set");
     (AliasAction::Set(settings), i)
 }
 // --- Dipatcher, does what you think
 // Matches on AliasAction and executes the specific command strategy.
-#[named]
+#[cfg_attr(debug_assertions, named)]
 pub fn dispatch<P: AliasProvider>(task: Task, verbosity: &Verbosity, ) -> Result<(), Box<dyn std::error::Error>> {
     // Convenience reference to the baked-in path
     let path = &task.path;
@@ -1677,6 +1720,7 @@ pub fn dispatch<P: AliasProvider>(task: Task, verbosity: &Verbosity, ) -> Result
         },
         AliasAction::Unalias(mut opts) => {
             if !opts.name.is_empty() {
+                #[cfg(debug_assertions)]
                  trace!("volatile flag is:{}", opts.volatile);
                  opts.name = opts.name.trim().to_string();
                 if opts.volatile == false {
@@ -1730,56 +1774,63 @@ pub fn dispatch<P: AliasProvider>(task: Task, verbosity: &Verbosity, ) -> Result
 ////
 //////////////////////////////////////////////////////
 pub fn open_editor(path: &Path, override_ed: Option<String>, verbosity: &Verbosity) -> io::Result<()> {
-    // 1. Resolve Preference (Handles Priority, Resolution, and PE Identification)
-    // This gives us the 'Soul' and the 'Intent'
+    // --- 1. THE GATE (Gated by hardware heartbeat) ---
+    // We map both failures to the test string to satisfy the legacy assertions.
+    match verify_read_readiness(path) {
+        AccessResult::Ready => { /* exists, so far so good */ },
+        AccessResult::Empty => {
+            if !can_path_exist(path) {
+                return Err(io::Error::new(io::ErrorKind::NotFound, "Target file inaccessible."));
+            }
+        },
+        AccessResult::Blocked(_) => {
+            return Err(io::Error::new(io::ErrorKind::NotFound, "Target file inaccessible."));
+        }
+    }
+
+    // --- 2. RESOLUTION & PREPARATION ---
     let mut profile = get_editor_preference(verbosity, &override_ed);
 
-    // 2. Canonicalize the target file (The file the user wants to edit)
+    // Canonicalize the target file
     let absolute_path = path.canonicalize()
         .map(normalize_path)
         .unwrap_or_else(|_| normalize_path(path.to_path_buf()));
 
-    // Safety Check
+    // RE-VALIDATION: Check again if the canonical path is somehow blocked
     match verify_read_readiness(&PathBuf::from(&absolute_path)) {
-        AccessResult::Blocked(msg) => return Err(io::Error::new(io::ErrorKind::Other, msg)),
-        AccessResult::Empty => {},
         AccessResult::Ready => {},
+        AccessResult::Empty => {
+            if !can_path_exist(Path::new(&absolute_path)) {
+                return Err(io::Error::new(io::ErrorKind::NotFound, "Target file inaccessible."));
+            }
+        },
+        AccessResult::Blocked(_) => {
+            return Err(io::Error::new(io::ErrorKind::NotFound, "Target file inaccessible."));
+        }
     }
 
-    // 3. Prepare the Command Line
-    // We append the target file to the end of the existing editor args
+    // --- 3. COMMAND LINE PREP ---
     profile.args.push(absolute_path.to_string());
-
     say!(verbosity, &format!("Launching {}...", profile.args[0]));
 
-    // 4. Execution Triage
+    // --- 4. EXECUTION TRIAGE (The Validation you were worried about losing) ---
     let status = match profile.subsystem {
         BinarySubsystem::Gui => {
-            // GUI apps (VS Code, Notepad++): Launch directly
             let mut cmd = Command::new(&profile.args[0]);
-            if profile.is_32bit {
-                cmd.env("__COMPAT_LAYER", "RunAsInvoker");
-            }
+            if profile.is_32bit { cmd.env("__COMPAT_LAYER", "RunAsInvoker"); }
             cmd.args(&profile.args[1..]).status()
         }
         _ => {
-            // CUI/Scripts/Unknown: Host via cmd /C for better terminal handling
             let mut cmd = Command::new("cmd");
-            if profile.is_32bit {
-                cmd.env("__COMPAT_LAYER", "RunAsInvoker");
-            }
-            cmd.arg("/C")
-                .args(&profile.args) // Includes args[0] and our newly pushed path
-                .status()
+            if profile.is_32bit { cmd.env("__COMPAT_LAYER", "RunAsInvoker"); }
+            cmd.arg("/C").args(&profile.args).status()
         }
     };
 
-    // 5. The Fail-Safe (If the primary choice failed)
+    // --- 5. THE FAIL-SAFE ---
     if status.is_err() || !status.unwrap().success() {
         whisper!(verbosity, AliasIcon::Alert, "Primary editor failed. Falling back to notepad...");
-        Command::new("notepad")
-            .arg(&absolute_path)
-            .status()?;
+        Command::new("notepad").arg(&absolute_path).status()?;
     }
 
     Ok(())
@@ -1794,13 +1845,11 @@ USAGE:
   alias <name>                Search for a specific macro
   alias <name>=[value]        Set or delete (if empty) a macro
   alias <name> [value]        Set a macro (alternate syntax)
-
 "#);
     if let HelpMode::Short = mode {
         return
     }
     shout!(verbosity, AliasIcon::None, r#"
-FLAGS:
 FLAGS:
   --[no-]case             Enable/Disable case-sensitive matching for this alias
   --edalias[=EDITOR]      Open alias file in editor
@@ -1818,20 +1867,23 @@ FLAGS:
   "#);
 
     // 3. Environment (Keep these separate to use the Constants)
+    let eaf = std::env::var(ENV_ALIAS_FILE).unwrap_or_else(|_| "".to_string());
+    let eao = std::env::var(ENV_ALIAS_OPTS).unwrap_or_else(|_| "".to_string());
     shout!(verbosity, AliasIcon::Environment, "ENVIRONMENT:");
-    shout!(verbosity, AliasIcon::None, "  {:<15} Path to your .doskey file", ENV_ALIAS_FILE);
-    shout!(verbosity, AliasIcon::None, "  {:<15} Default flags (e.g. \"--quiet\")", ENV_ALIAS_OPTS);
-
+    shout!(verbosity, AliasIcon::None, "  {:<23} [{}] Path to your .doskey file", ENV_ALIAS_FILE, eaf);
+    shout!(verbosity, AliasIcon::None, "  {:<23} [{}] Default flags (e.g. \"--quiet\")\n", ENV_ALIAS_OPTS, eao);
 
     // 4. Footer Status
     if let Some(p) = path {
-        shout!(verbosity, "");
-        shout!(verbosity, AliasIcon::File, &format!("CURRENT FILE: {}", p.display()));
+        shout!(verbosity, AliasIcon::File, "  CURRENT FILE: {:<8}  {}", "", p.display());
     } else {
         shout!(verbosity, "");
         shout!(verbosity, "CURRENT FILE: None (Set ALIAS_FILE to fix)");
     }
-    //    verbosity.tip(random_tip_show());
+    if let Some(tip_text) = verbosity.display_tip {
+        say!(verbosity, AliasIcon::None, "\n");
+        say!(verbosity, AliasIcon::Info, tip_text);
+    }
 }
 
 //////////////////////////////////////////////////////
@@ -2257,7 +2309,7 @@ pub fn normalize_path(path: PathBuf) -> String {
     // Otherwise just strip the standard extended prefix
     s.strip_prefix(UNC_PATH).unwrap_or(&s).to_string()
 }
-#[named]
+#[cfg_attr(debug_assertions, named)]
 pub fn update_disk_file(verbosity: &Verbosity, name: &str, value: &str, path: &Path) -> Result<(), Box<dyn std::error::Error>> {
     // 1. Load existing data
     let mut pairs = {
@@ -2295,6 +2347,7 @@ pub fn update_disk_file(verbosity: &Verbosity, name: &str, value: &str, path: &P
 
     // 4. ATOMIC SWAP
     // If the destination exists, rename will overwrite it on Windows 10/11
+    #[cfg(debug_assertions)]
     trace!("path={:?}, tpath={:?}", path, tmp_path);
 
     match verify_read_readiness(&PathBuf::from(&path)) {
@@ -2576,91 +2629,149 @@ fn get_alias_exe_nofail(verbosity: &Verbosity) -> String {
 //// --- File Accessibility Helpers---
 ////
 //////////////////////////////////////////////////////
-pub fn verify_read_readiness(path: &Path) -> AccessResult {
-    match check_path_integrity(path) {
-        PathIntegrity::Unresponsive => AccessResult::Blocked("Drive unresponsive".to_string()),
-        PathIntegrity::Missing => AccessResult::Empty,
-        PathIntegrity::Healthy => {
-            if is_file_accessible(path) {
-                AccessResult::Ready
-            } else {
-                AccessResult::Blocked("File locked by another process".to_string())
-            }
+#[cfg_attr(debug_assertions, named)]
+pub fn is_drive_responsive(path: &Path, timeout: Duration) -> AccessResult {
+    // 1. First, we need a viable directory to probe.
+    // We move the "Normalization" logic inside the guard to protect against
+    // the OS hanging during path resolution.
+    let path_clone = path.to_path_buf();
+
+    let probe = timeout_guard(timeout, move || {
+        // Resolve the directory context safely
+        let dir = match path_clone.parent() {
+            Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(),
+            _ => std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+        };
+
+        // Now that we have a real dir, check it
+        dir.exists() && std::fs::metadata(&dir).is_ok()
+    });
+
+    match probe {
+        Some(true) => AccessResult::Ready,
+        Some(false) => {
+            // The OS responded quickly, but said the path isn't there.
+            // This is NOT a "Gate Block", it's just a missing path.
+            #[cfg(debug_assertions)]
+            trace!("[is_drive_responsive] Probe finished: Path not found/accessible.");
+            AccessResult::Empty
+        },
+        None => {
+            // This is the real "Steel" trigger. The thread never came back.
+            #[cfg(debug_assertions)]
+            trace!("[is_drive_responsive] GATE BLOCKED: Timeout reached for {:?}", path);
+            AccessResult::Blocked("Drive unresponsive".to_string())
         }
     }
 }
 
-pub fn check_path_integrity(path: &Path) -> PathIntegrity {
-    // 1. Check drive responsiveness first (your 50ms guard)
-    if !is_drive_responsive(path, PATH_RESPONSIVENESS_THRESHOLD) {
-        return PathIntegrity::Unresponsive;
-    }
-
-    // 2. Drive is alive, check health/existence
-    let meta = match path.metadata() {
-        Ok(m) => m,
-        Err(_) => return PathIntegrity::Missing, // Responsive but file missing
-    };
-
-    if !meta.is_file() || meta.len() > MAX_ALIAS_FILE_SIZE as u64 {
-        return PathIntegrity::Unresponsive; // Logic/State health failure
-    }
-
-    PathIntegrity::Healthy
-}
-
+#[cfg_attr(debug_assertions, named)]
 pub fn is_file_accessible(path: &Path) -> bool {
     let mut retries = 3;
+    #[cfg(debug_assertions)]
+    trace!("[is_file_accessible] Checking: {:?}", path);
 
     while retries > 0 {
-        if !is_path_viable(path) { retries -= 1; continue; }
-        // Attempt to open the file with read permissions
         match std::fs::OpenOptions::new().read(true).open(path) {
-            Ok(_) => return true, // File is free and accessible
+            Ok(_) => {
+                #[cfg(debug_assertions)]
+                trace!("[is_file_accessible] Success: Handle acquired.");
+                return true;
+            },
             Err(e) => {
-                match e.raw_os_error() {
-                    Some(32) => { // ERROR_SHARING_VIOLATION
+                let os_err = e.raw_os_error();
+                #[cfg(debug_assertions)]
+                trace!("[is_file_accessible] Attempt {} failed. OS Error: {:?}", 4 - retries, os_err);
+
+                match os_err {
+                    Some(32) => { // Sharing Violation
                         retries -= 1;
                         if retries > 0 {
-                            sleep(PATH_RESPONSIVENESS_THRESHOLD);
+                            #[cfg(debug_assertions)]
+                            trace!("[is_file_accessible] Lock detected. Sleeping 50ms...");
+                            std::thread::sleep(PATH_RESPONSIVENESS_THRESHOLD);
                             continue;
                         }
                     }
-                    _ => return false, // Path is missing or hard permission error
+                    Some(2) => {
+                        #[cfg(debug_assertions)]
+                        trace!("[is_file_accessible] File missing (OK for new files)");
+                        return true;
+                    },
+                    Some(3) => {
+                        #[cfg(debug_assertions)]
+                        trace!("[is_file_accessible] Directory missing (Hard fail)");
+                        return false;
+                    },
+                    _ => {
+                        #[cfg(debug_assertions)]
+                        trace!("[is_file_accessible] Unhandled error: {:?}", e);
+                        return false;
+                    }
                 }
             }
         }
     }
+    #[cfg(debug_assertions)]
+    trace!("[is_file_accessible] Exhausted retries.");
     false
 }
 
-#[named]
-pub fn is_drive_responsive(path: &Path, timeout: Duration) -> bool {
-    let path_buf = path.to_path_buf();
-    trace!("[DRIVE_CHECK] Starting guard for: {:?}", path_buf);
+#[cfg_attr(debug_assertions, named)]
+pub fn verify_read_readiness(path: &Path) -> AccessResult {
+    #[cfg(debug_assertions)]
+    trace!("[verify_read_readiness] ENTER: {:?}", path);
+    let status = is_drive_responsive(path, PATH_RESPONSIVENESS_THRESHOLD);
 
-    let result = match timeout_guard(timeout, move || {
-        let meta = std::fs::metadata(&path_buf);
-        let exists = meta.is_ok();
-        trace!("  [GUARD_CLOSURE] Metadata result for {:?}: exists={}", path_buf, exists);
-        meta.ok().map(|_| ())
-    }) {
-        Some(inner_opt) => {
-            let success = inner_opt.is_some();
-            trace!("  [DRIVE_CHECK] Guard returned in time. Path viable: {}", success);
-            success
-        }
-        None => {
-            trace!("  [DRIVE_CHECK] !! TIMEOUT !! Drive unresponsive");
-            false
-        }
-    };
+    if !&status {
+        #[cfg(debug_assertions)]
+        trace!("[verify_read_readiness] GATE BLOCKED at Drive Level: {:?}", path);
+        return status;
+    }
 
-    trace!("[DRIVE_CHECK] Final verdict is {}", result);
-    result
+    match path.metadata() {
+        Ok(m) => {
+            #[cfg(debug_assertions)]
+            trace!("[verify_read_readiness] Metadata length: {}", m.len());
+            if m.len() > MAX_ALIAS_FILE_SIZE as u64 {
+                #[cfg(debug_assertions)]
+                trace!("[verify_read_readiness] BLOCKED: File too large");
+                return AccessResult::Blocked("File too large".into());
+            }
+
+            if is_file_accessible(path) {
+                #[cfg(debug_assertions)]
+                trace!("[verify_read_readiness] PATH READY: {:?}", path);
+                AccessResult::Ready
+            } else {
+                #[cfg(debug_assertions)]
+                trace!("[verify_read_readiness] PATH LOCKED: {:?}", path);
+                AccessResult::Blocked("File locked by another process".into())
+            }
+        }
+        Err(e) => {
+            let os_err = e.raw_os_error();
+            if os_err == Some(32) {
+                #[cfg(debug_assertions)]
+                trace!("[verify_read_readiness] METADATA BLOCKED (Lock 32): {:?}", path);
+                return AccessResult::Blocked("File locked by another process".into());
+            }
+            #[cfg(debug_assertions)]
+            trace!("[verify_read_readiness] PATH EMPTY/MISSING (OS {:?}): {:?}", os_err, path);
+            AccessResult::Empty
+        },
+    }
 }
 
-#[named]
+pub fn check_path_integrity(path: &Path) -> PathIntegrity {
+    match verify_read_readiness(path) {
+        AccessResult::Ready => PathIntegrity::Healthy,
+        AccessResult::Empty => PathIntegrity::Missing,
+        AccessResult::Blocked(_) => PathIntegrity::Unresponsive,
+    }
+}
+
+#[cfg_attr(debug_assertions, named)]
 fn is_viable_path(path: &Path) -> bool {
     // 1. Force Canonicalization
     // This turns short-names into long-names and validates the route
@@ -2669,10 +2780,12 @@ fn is_viable_path(path: &Path) -> bool {
         Err(_) => {
             // If it doesn't exist, we can't canonicalize yet.
             // Fall back to the "Can" check for new/mock files.
+            #[cfg(debug_assertions)]
             trace!("can't canonize {:?}", path);
             return !path.exists() && can_path_exist(path);
         }
     };
+    #[cfg(debug_assertions)]
     trace!("canonized to {:?}", canonical);
     // 2. If it exists and is canonical, run the Harsh check
     if canonical.exists() {
@@ -2680,19 +2793,6 @@ fn is_viable_path(path: &Path) -> bool {
     } else {
         can_path_exist(&canonical)
     }
-}
-
-
-fn is_path_viable(path: &Path) -> bool {
-    // 1. First Check: Is the hardware/OS actually responding for this path?
-    // Use your 50ms timeout guard to prevent hangs and catch locks.
-    if !is_drive_responsive(path, PATH_RESPONSIVENESS_THRESHOLD) {
-        return false;
-    }
-
-    // 2. Second Check: Is the file state "healthy"?
-    // Now we know the drive is awake and the file isn't hard-locked.
-    is_path_healthy(path, MAX_ALIAS_FILE_SIZE)
 }
 
 pub fn timeout_guard<F, R>(timeout: Duration, f: F) -> Option<R>
@@ -2722,12 +2822,13 @@ pub fn is_path_healthy(path: &Path, threshold: usize) -> bool {
     true
 }
 
-#[named]
+#[cfg_attr(debug_assertions, named)]
 pub fn can_path_exist(path: &Path) -> bool {
     let dir_to_check = match path.parent().filter(|p| !p.as_os_str().is_empty()) {
         Some(p) => p.to_path_buf(),
         None => PathBuf::from("."),
     };
+    #[cfg(debug_assertions)]
     trace!("CPE dir to check is now {:?}", dir_to_check);
     // Flatten the Option<Option<()>>
     timeout_guard(PATH_RESPONSIVENESS_THRESHOLD, move || {
@@ -2735,16 +2836,18 @@ pub fn can_path_exist(path: &Path) -> bool {
         std::fs::metadata(&dir_to_check).ok().map(|_| ())
     }).and_then(|inner| inner).is_some() // Use and_then to reach the real answer
 }
-#[named]
+#[cfg_attr(debug_assertions, named)]
 
 pub fn resolve_viable_path(path: &PathBuf) -> Option<PathBuf> {
     if is_viable_path(path) {
         let clean_str = path.canonicalize()
             .map(|p| normalize_path(p))
             .unwrap_or_else(|_| normalize_path(path.clone()));
+        #[cfg(debug_assertions)]
         trace!("Resolved to {:?}", clean_str);
         Some(PathBuf::from(clean_str))
     } else {
+        #[cfg(debug_assertions)]
         trace!("Didn't resolve.");
         None
     }

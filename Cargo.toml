@@ -1,16 +1,8 @@
-# Cargo.toml
-# allow versioning overall without breaking cargo
+# V:\Projects\alias\Cargo.toml
 [package-info]
 name = "alias"
 version = "0.10.0"
 edition = "2024"
-
-[profile.release]
-opt-level = 3              # Maximize speed (Level 3 is the highest)
-lto = true                 # Link Time Optimization (optimizes across crate boundaries)
-codegen-units = 1          # Allows for more aggressive optimizations
-panic = "abort"            # Removes stack unwinding code (smaller/faster)
-strip = true               # Automatically strips symbols (no need for external tools)
 
 [workspace]
 members = [
@@ -20,5 +12,24 @@ members = [
     "alias_win32",
     "alias_hybrid",
 ]
-
 resolver = "3"
+
+[workspace.dependencies]
+# --- Internal Project Paths (Defined ONCE here) ---
+alias_lib = { path = "./alias_lib" }
+alias_nuke = { path = "./alias_nuke" }
+alias_win32 = { path = "./alias_win32" }
+alias_wrapper = { path = "./alias_wrapper" }
+
+# --- Shared External Crates ---
+windows-sys = { version = "0.61.2", features = ["Win32_System_Console", "Win32_System_Registry", "Win32_Foundation"] }
+tempfile = "3.24.0"
+serial_test = "3.2.0"
+ctor = "0.2.9" # Use a consistent version across the board
+lazy_static = "1.5.0"
+function_name = "0.3.0"
+winreg = "0.55.0"
+shlex = "1.3.0"
+fs2 = "0.4.3"
+assert_cmd = "2.1.1"
+predicates = "3.1.3"

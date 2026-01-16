@@ -1,10 +1,17 @@
 // alias_hybrid/src/lib.rs
 
+extern crate function_name;
+
 use std::io;
 use std::path::Path;
 use alias_lib::*;
 use alias_win32::Win32LibraryInterface;
 use alias_wrapper::WrapperLibraryInterface;
+#[allow(unused_imports)]
+#[cfg(debug_assertions)]
+use function_name::named;
+
+extern crate alias_lib;
 
 pub struct HybridLibraryInterface;
 
@@ -18,7 +25,6 @@ impl AliasProvider for HybridLibraryInterface {
 
             // 2. Win32 says "False" (it didn't work, but no crash). Try Wrapper.
             Ok(false) => {
-                trace!("Win32 API returned false; attempting Wrapper fallback.");
                 WrapperLibraryInterface::raw_set_macro(name, value)
             },
 
@@ -27,7 +33,6 @@ impl AliasProvider for HybridLibraryInterface {
                 // Check if it's a "safe" error to ignore (like the API not being available)
                 // Otherwise, PERCOLATE the error up.
                 if e.kind() == io::ErrorKind::Unsupported {
-                    trace!("Win32 API Unsupported; falling back to Wrapper.");
                     WrapperLibraryInterface::raw_set_macro(name, value)
                 } else {
                     // Return the actual error so the user knows WHY it failed.
@@ -136,7 +141,7 @@ impl AliasProvider for HybridLibraryInterface {
         };
 
         // 3. Try File
-        let file = match get_alias_path() {
+        let file = match get_alias_path("") {
             Some(p) => match parse_macro_file(&p, verbosity) {
                 Ok(list) => list,
                 Err(e) => {

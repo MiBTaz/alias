@@ -1,10 +1,27 @@
 // alias_lib/tests/local_library_tests.rs
 
+use std::path::PathBuf;
+use std::time::Duration;
 use std::io;
-use std::path::Path;
-use std::sync::Mutex;
-use lazy_static::lazy_static;
 use alias_lib::*;
+use alias_lib::ShowFeature::{Off, On};
+use std::{env, fs};
+use serial_test::serial;
+
+// shared code start
+extern crate alias_lib;
+
+#[path = "../../tests/shared_test_utils.rs"]
+mod test_suite_shared;
+#[allow(unused_imports)]
+use test_suite_shared::{MockProvider, MOCK_RAM, LAST_CALL, global_test_setup};
+
+// shared code end
+#[cfg(test)]
+#[ctor::ctor]
+fn local_library_tests() {
+    global_test_setup();
+}
 
 #[macro_export]
 macro_rules! trace {
@@ -36,45 +53,11 @@ fn init() {
     }
 }
 
-lazy_static! {
-    // This holds the arguments passed to the last 'set_alias' call
-    static ref LAST_CALL: Mutex<Option<SetOptions>> = Mutex::new(None);
-}
-#[allow(dead_code)]
-static MOCK_RAM: Mutex<Vec<(String, String)>> = Mutex::new(Vec::new());
-#[allow(dead_code)]
-struct MockProvider;
-impl AliasProvider for MockProvider {
-    // 1. REMOVED remove_alias (it wasn't in the trait)
-
-    // 2. Added underscores to unused params to kill warnings
-    fn raw_set_macro(_name: &str, _val: Option<&str>) -> io::Result<bool> { Ok(true) }
-    fn raw_reload_from_file(_v: &Verbosity, _path: &Path) -> io::Result<()> { Ok(()) }
-    fn get_all_aliases(_v: &Verbosity) -> io::Result<Vec<(String, String)>> { Ok(vec![]) }
-    fn write_autorun_registry(_s: &str, _v: &Verbosity) -> io::Result<()> { Ok(()) }
-    fn read_autorun_registry() -> String { String::new() }
-    fn purge_ram_macros(_v: &Verbosity) -> Result<PurgeReport, io::Error> { Ok(PurgeReport::default()) }
-    fn purge_file_macros(_v: &Verbosity, _path: &Path) -> Result<PurgeReport, io::Error> { Ok(PurgeReport::default()) }
-    fn reload_full(_v: &Verbosity, _path: &Path, _force: bool) -> Result<(), Box<dyn std::error::Error>> { Ok(()) }
-    fn query_alias(_s: &str, _v: &Verbosity) -> Vec<String> { vec![] }
-
-    // This is the one we actually use for testing
-    fn set_alias(opts: SetOptions, _path: &Path, _v: &Verbosity) -> io::Result<()> {
-        let mut call = LAST_CALL.lock().unwrap();
-        *call = Some(opts);
-        Ok(())
-    }
-
-    fn run_diagnostics(_path: &Path, _v: &Verbosity) -> Result<(), Box<dyn std::error::Error>> { Ok(()) }
-    fn alias_show_all(_v: &Verbosity) -> Result<(), Box<dyn std::error::Error>> { Ok(()) }
-}
-
 // =========================================================
 // SECTION 1: COMMAND PARSER & ACTION MAPPING (Tests 1-25)
 // =========================================================
 #[cfg(test)]
 mod argument_tests {
-    use std::path::PathBuf;
     use super::*;
     //    use std::path::PathBuf;
 
@@ -446,13 +429,10 @@ mod argument_tests {
 }
 #[cfg(test)]
 mod existence_checks {
+    use super::*;
     #[cfg(test)]
     mod path_logic_tests {
-        //        use super::*;
-        use std::path::PathBuf;
-        use std::time::Duration;
-        use alias_lib::{can_path_exist, is_drive_responsive, is_file_accessible, is_path_healthy, resolve_viable_path, timeout_guard};
-
+        use super::*;
         // --- timeout_guard tests ---
         #[test]
         fn test_timeout_guard_success() {
@@ -487,7 +467,7 @@ mod existence_checks {
         #[test]
         fn test_drive_responsive_on_real_path() {
             let cur = std::env::current_dir().unwrap();
-            assert!(is_drive_responsive(&cur, Duration::from_millis(100)));
+            assert!(&is_drive_responsive(&cur, Duration::from_millis(100)));
         }
 
         // --- is_path_healthy tests ---
@@ -723,9 +703,7 @@ mod round_trip_tests {
 // SECTION 2: SOVEREIGN VOICE & UI MACROS (Tests 26-40)
 // =========================================================
 mod voice_and_ui {
-    use std::io;
-    use alias_lib::ShowFeature::{Off, On};
-    use alias_lib::{failure, get_random_tip, random_tip_show, say, shout, voice, AliasIcon, ErrorCode, ShowTips, Verbosity, VerbosityLevel, ICON_MATRIX};
+    use super::*;
 
     #[test]
     fn t26_icon_empty() { assert_eq!(Verbosity::normal().icon_format(AliasIcon::Say, ""), ""); }
@@ -785,10 +763,7 @@ mod voice_and_ui {
 // SECTION 3: INTERNAL DATA & AUDIT LOGIC (Tests 41-60)
 // =========================================================
 mod data_and_audit {
-    use std::{env, fs};
-    use std::path::PathBuf;
-    use serial_test::serial;
-    use alias_lib::{calculate_new_file_state, get_alias_path, is_path_healthy, is_valid_name, mesh_logic, parse_arguments, parse_macro_file, voice, AliasAction, AliasEntryMesh, ENV_ALIAS_FILE};
+    use super::*;
 
     #[test]
     fn t41_mesh_basic() { assert_eq!(mesh_logic(vec![("a".into(), "1".into())], vec![("a".into(), "1".into())]).len(), 1); }
@@ -876,43 +851,12 @@ mod data_and_audit {
 // SECTION 4: DISPATCH & INTEGRATION (Tests 61-75)
 // =========================================================
 mod dispatch_and_integration {
-    use std::{env, io};
-    use std::path::{Path, PathBuf};
-    use std::sync::Mutex;
-    use serial_test::serial;
-    use alias_lib::{dispatch, failure, get_alias_path, parse_arguments, AliasAction, AliasProvider, ErrorCode, HelpMode, PurgeReport, SetOptions, Task, Verbosity, DEFAULT_ALIAS_FILENAME, ENV_ALIAS_FILE};
-
-    // --- SHARED TEST STATE FOR DISPATCH TESTS ---
-    static LAST_CALL: Mutex<Option<SetOptions>> = Mutex::new(None);
-
-    struct MockProvider;
-    impl AliasProvider for MockProvider {
-        // 1. REMOVED remove_alias entirely
-
-        // 2. Underscored unused params to kill warnings
-        fn raw_set_macro(_name: &str, _val: Option<&str>) -> io::Result<bool> { Ok(true) }
-        fn raw_reload_from_file(_v: &Verbosity, _p: &Path) -> io::Result<()> { Ok(()) }
-        fn get_all_aliases(_v: &Verbosity) -> io::Result<Vec<(String, String)>> { Ok(vec![]) }
-        fn write_autorun_registry(_s: &str, _v: &Verbosity) -> io::Result<()> { Ok(()) }
-        fn read_autorun_registry() -> String { String::new() }
-        fn purge_ram_macros(_v: &Verbosity) -> Result<PurgeReport, io::Error> { Ok(PurgeReport::default()) }
-        fn purge_file_macros(_v: &Verbosity, _p: &Path) -> Result<PurgeReport, io::Error> { Ok(PurgeReport::default()) }
-        fn reload_full(_v: &Verbosity, _p: &Path, _f: bool) -> Result<(), Box<dyn std::error::Error>> { Ok(()) }
-        fn query_alias(_s: &str, _v: &Verbosity) -> Vec<String> { vec![] }
-
-        fn set_alias(opts: SetOptions, _path: &Path, _v: &Verbosity) -> io::Result<()> {
-            let mut call = LAST_CALL.lock().unwrap();
-            *call = Some(opts);
-            Ok(())
-        }
-
-        fn run_diagnostics(_p: &Path, _v: &Verbosity) -> Result<(), Box<dyn std::error::Error>> { Ok(()) }
-        fn alias_show_all(_v: &Verbosity) -> Result<(), Box<dyn std::error::Error>> { Ok(()) }
-    }
 
     // =========================================================
     // SECTION 4: DISPATCH & INTEGRATION (THE FINAL 15)
     // =========================================================
+
+    use super::*;
 
     #[test]
     fn t61_custom_file_flag() {
@@ -1041,7 +985,8 @@ mod dispatch_and_integration {
         assert_eq!(q.get(0).unwrap().action, AliasAction::Invalid);
     }
 
-    #[test] #[serial]
+    #[test]
+    #[serial]
     fn t71_env_path_dir() {
         unsafe {
             env::set_var(ENV_ALIAS_FILE, ".");

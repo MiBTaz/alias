@@ -7,7 +7,7 @@ use alias_lib::*;
 
 #[cfg(test)]
 #[ctor::ctor]
-fn init() {
+fn alias_lib_integration_test() {
     unsafe {
         std::env::remove_var("ALIAS_FILE");
         std::env::remove_var("ALIAS_OPTS");

@@ -6,15 +6,10 @@ use std::process::Command;
 use assert_cmd::cargo_bin;
 #[allow(unused_imports)]
 use assert_cmd::prelude::*;
+
 #[cfg(test)]
 #[ctor::ctor]
-fn init() {
-    unsafe {
-        std::env::remove_var("ALIAS_FILE");
-        std::env::remove_var("ALIAS_OPTS");
-        std::env::remove_var("ALIAS_PATH");
-    }
-}
+fn init_cli_tests_wrapper() { global_test_setup(); }
 
 #[test]
 #[serial]
