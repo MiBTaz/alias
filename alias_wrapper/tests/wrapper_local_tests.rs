@@ -1,5 +1,6 @@
 // alias_wrapper/tests/wrapper_local_tests.rs
 
+use function_name::named;
 use alias_lib::*;
 use serial_test::serial;
 #[allow(unused_imports)]
@@ -9,6 +10,30 @@ use alias_wrapper::WrapperLibraryInterface as P;
 // shared code start
 extern crate alias_lib;
 
+#[path = "../../tests/state_restoration.rs"]
+mod stateful;
+#[cfg(test)]
+#[ctor::ctor]
+fn win32_local_tests_init() {
+    eprintln!("[PRE-FLIGHT] Warning: System state is starting.");
+    // FORCE LINKAGE: This prevents the linker from tree-shaking the module
+    // and silences the "unused" warnings by actually "using" them.
+    let _ = stateful::has_backup();
+    if stateful::is_stale() {
+        // This path probably won't be hit, but the compiler doesn't know that.
+        eprintln!("[PRE-FLIGHT] Warning: System state is stale.");
+    }
+    let _ = stateful::has_backup();
+    stateful::pre_flight_inc();
+    global_test_setup();
+}
+#[cfg(test)]
+#[ctor::dtor]
+fn win32_local_tests_end() {
+    eprintln!("[POST-FLIGHT] Warning: System state is finished.");
+    stateful::post_flight_dec();
+}
+
 #[path = "../../tests/shared_test_utils.rs"]
 mod test_suite_shared;
 #[allow(unused_imports)]
@@ -16,7 +41,7 @@ use test_suite_shared::{MOCK_RAM, MockProvider, LAST_CALL, global_test_setup};
 
 // shared code end
 
-// use ctor to wipe env vars
+// use ctor to wipe envvars
 #[cfg(test)]
 #[ctor::ctor]
 fn init_wrapper_local() {
@@ -74,5 +99,6 @@ fn test_wrapper_setup_flow() {
 fn get_test_path(suffix: &str) -> std::path::PathBuf {
     std::path::PathBuf::from(format!("test_wrapper_{}_{:?}.doskey", suffix, std::thread::current().id()))
 }
+
 
 include!("../../tests/cli_tests_wrapper.rs");

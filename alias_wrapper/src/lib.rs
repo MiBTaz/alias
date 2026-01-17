@@ -238,7 +238,7 @@ impl alias_lib::AliasProvider for WrapperLibraryInterface {
         let os_aliases = Self::get_all_aliases(verbosity)?;
 
         // Perform the audit and percolate any error immediately
-        alias_lib::perform_audit(os_aliases, verbosity)
+        alias_lib::perform_audit(os_aliases, verbosity, &Self::provider_type())
     }
     fn provider_type() -> ProviderType { ProviderType::Wrapper  }
     fn is_api_responsive(_timeout: Duration) -> bool {

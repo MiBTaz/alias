@@ -10,11 +10,28 @@ use test_suite_shared::{MockProvider, MOCK_RAM, LAST_CALL, global_test_setup};
 #[allow(unused_imports)]
 use test_suite_shared::*;
 
-// shared code end
+#[path = "../../tests/state_restoration.rs"]
+mod stateful;
 #[cfg(test)]
 #[ctor::ctor]
-fn alias_lib_integration_test() {
+fn alias_lib_integration_test_init() {
+    eprintln!("[PRE-FLIGHT] Warning: System state is starting.");
+    // FORCE LINKAGE: This prevents the linker from tree-shaking the module
+    // and silences the "unused" warnings by actually "using" them.
+    let _ = stateful::has_backup();
+    if stateful::is_stale() {
+        // This path probably won't be hit, but the compiler doesn't know that.
+        eprintln!("[PRE-FLIGHT] Warning: System state is stale.");
+    }
+    let _ = stateful::has_backup();
+    stateful::pre_flight_inc();
     global_test_setup();
+}
+#[cfg(test)]
+#[ctor::dtor]
+fn alias_lib_integration_test_send() {
+    eprintln!("[POST-FLIGHT] Warning: System state is finished.");
+    stateful::post_flight_dec();
 }
 
 

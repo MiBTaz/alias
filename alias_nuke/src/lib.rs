@@ -1,3 +1,5 @@
+// alias_nuke/src/lib.rs
+
 use std::{ptr};
 use std::os::windows::ffi::OsStrExt;
 use windows_sys::Win32::Foundation::GetLastError;
@@ -39,7 +41,7 @@ pub fn api_set_macro(name: &str, value: Option<&str>) -> bool {
     }
 }
 
-fn get_target_exe_wide() -> *const u16 {
+pub fn get_target_exe_wide() -> *const u16 {
     use std::sync::OnceLock;
     static BUCKET_W: OnceLock<Vec<u16>> = OnceLock::new();
 

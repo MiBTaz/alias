@@ -155,8 +155,12 @@ impl AliasProvider for HybridLibraryInterface {
         };
 
         // 4. Final Audit
-        perform_triple_audit(verbosity, w32, wrap, file);
+        perform_triple_audit(verbosity, w32, wrap, file, &Self::provider_type());
 
         Ok(())
     }
+    fn provider_type() -> ProviderType {
+        ProviderType::Hybrid
+    }
+
 }

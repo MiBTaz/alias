@@ -16,11 +16,31 @@ mod test_suite_shared;
 #[allow(unused_imports)]
 use test_suite_shared::{MockProvider, MOCK_RAM, LAST_CALL, global_test_setup};
 
+#[path = "../../tests/state_restoration.rs"]
+mod stateful;
+
 // shared code end
 #[cfg(test)]
 #[ctor::ctor]
-fn local_library_tests() {
+fn local_library_tests_init() {
+    eprintln!("[PRE-FLIGHT] Warning: System state is starting.");
+    // FORCE LINKAGE: This prevents the linker from tree-shaking the module
+    // and silences the "unused" warnings by actually "using" them.
+    let _ = stateful::has_backup();
+    if stateful::is_stale() {
+        // This path probably won't be hit, but the compiler doesn't know that.
+        eprintln!("[PRE-FLIGHT] Warning: System state is stale.");
+    }
+    let _ = stateful::has_backup();
+    stateful::pre_flight_inc();
     global_test_setup();
+}
+
+#[cfg(test)]
+#[ctor::dtor]
+fn local_library_tests_end() {
+    eprintln!("[POST-FLIGHT] Warning: System state is finished.");
+    stateful::post_flight_dec();
 }
 
 #[macro_export]
@@ -162,10 +182,10 @@ mod argument_tests {
         assert!(t3.path.as_os_str().is_empty(), "Queries should have empty paths as they are RAM-based");
     }
 
+    // alias_lib\tests\local_library_tests.rs
+
     #[test]
     fn test_default_path_resolution() {
-        // We add --which to create a Query task first.
-        // The remaining args "my_cmd new_cmd=value" become the Greedy Set payload.
         let args = vec![
             "alias".into(),
             "--which".into(),
@@ -174,21 +194,19 @@ mod argument_tests {
         ];
         let (mut queue, _) = parse_arguments(&args);
 
-        // 2. The greedy payload "my_cmd new_cmd=value" creates the second task: A Set.
-        // This should have the default .doskey path.
-        let task_s = queue.pop().expect("Should have set task from greedy payload");
+        // 2. The Set Task (Greedy Payload)
+        let task_s = queue.pop().expect("Should have set task");
         assert!(task_s.path.to_string_lossy().contains(".doskey"), "Set MUST have a path");
 
-        // 1. The --which flag creates the first task: A Query.
-        // This should have an empty path (RAM-based).
+        // 1. The Which Task
         let task_q = queue.pop().expect("Should have query task from --which");
-        assert!(task_q.path.to_string_lossy().is_empty(), "Which should have NO path");
 
+        // FIX: Update this assertion to match your new `requires_file` logic
+        assert!(!task_q.path.to_string_lossy().is_empty(), "Which now REQUIRES a path context");
+        assert!(task_q.path.to_string_lossy().contains(".doskey"), "Which should point to default file");
 
-        // 3. Final Safety
         assert_eq!(queue.len(), 0, "Queue should be empty");
     }
-
 
     #[test]
     fn test_setup_requirement() {

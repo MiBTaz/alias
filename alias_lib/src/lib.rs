@@ -187,7 +187,11 @@ const REG_CURRENT_USER: &str = "HKCU";
 const PATH_SEPARATOR: &str = r"\";
 pub const UNC_GLOBAL_PATH: &str = r"\\?\UNC\";
 pub const UNC_PATH: &str = r"\\?\";
+//#[cfg(not(test))]
 pub const REG_SUBKEY: &str = r"Software\Microsoft\Command Processor";
+//#[cfg(test)]
+//pub const REG_SUBKEY: &str = r"Software\AliasTool\Temp\Command Processor";
+
 pub const REG_AUTORUN_KEY: &str = "AutoRun";
 pub const ENV_ALIAS_FILE: &str = "ALIAS_FILE";
 pub const ENV_ALIAS_OPTS: &str = "ALIAS_OPTS";
@@ -198,6 +202,7 @@ const DEFAULT_APPDATA_ALIAS_DIR: &str = "alias_tool";
 const FALLBACK_EDITOR: &str = "notepad";
 pub const IO_RESPONSIVENESS_THRESHOLD: Duration = Duration::from_millis(500);
 const PATH_RESPONSIVENESS_THRESHOLD: Duration = Duration::from_millis(50);
+pub const BACKOFF__RESPONSIVENESS_THRESHOLD: Duration = Duration::from_millis(71);
 const DEFAULT_EXTS: &str = ".COM;.EXE;.BAT;.CMD;.VBS;.VBE;.JS;.JSE;.WSF;.WSH;.MSC";
 const DEFAULT_EXTS_EXE: &str = ".COM;.EXE;.SCR";
 pub const RESERVED_NAMES: &[&str] = &[
@@ -566,7 +571,7 @@ impl Verbosity {
         let msg = format!("{}{}", line, audit_block);
         if !self.emitln(&msg) { println!("{}", msg); }
     }
-
+/*
     fn align(&self, name: &str, value: &str, width: usize, wdf: (bool, bool, bool)) {
         if self.level == VerbosityLevel::Mute { return; }
 
@@ -582,6 +587,33 @@ impl Verbosity {
         let w_m = if w { self.get_icon_str(AliasIcon::Win32) } else { spacer };
         let d_m = if d { self.get_icon_str(AliasIcon::Doskey) } else { spacer };
         let f_m = if f { self.get_icon_str(AliasIcon::File)   } else { spacer };
+
+        print!("{:width$} [{}{}{}]", line, w_m, d_m, f_m, width = width);
+    }
+*/
+    fn align(&self, name: &str, value: &str, width: usize, wdf: (bool, bool, bool), provider: &ProviderType) {
+        if self.level == VerbosityLevel::Mute { return; }
+
+        let display_val = if value.is_empty() { "<EMPTY>" } else { value };
+        let line = format!("{}={}", name, display_val);
+        let (w, d, f) = wdf;
+
+        let spacer = if self.show_icons.is_on() { "  " } else { " " };
+
+        // --- THE LOGIC FIX ---
+        // If we are a Wrapper, the 'Win32' slot (w) should actually show the Doskey icon.
+        // If we are Hybrid/Win32, it keeps the lightning bolt.
+        let w_m = if w {
+            match provider {
+                ProviderType::Wrapper => self.get_icon_str(AliasIcon::Doskey), // 🔑 for Wrapper
+                _ => self.get_icon_str(AliasIcon::Win32),                    // ⚡ for API
+            }
+        } else {
+            &spacer.to_string()
+        };
+
+        let d_m = if d { self.get_icon_str(AliasIcon::Doskey) } else { &spacer.to_string() };
+        let f_m = if f { self.get_icon_str(AliasIcon::File)   } else { &spacer.to_string() };
 
         print!("{:width$} [{}{}{}]", line, w_m, d_m, f_m, width = width);
     }
@@ -799,6 +831,7 @@ impl AliasAction {
             | AliasAction::Remove(_)
             | AliasAction::Set(_)
             | AliasAction::ShowAll
+            | AliasAction::Which
             => true,
             // Everything else (Help, Setup, Which, etc.) doesn't touch the d
             _ => false,
@@ -1086,7 +1119,6 @@ pub trait AliasProvider {
         }
         Ok(report)
     }
-
     fn reload_full(verbosity: &Verbosity, path: &Path, clear: bool) -> Result<(), Box<dyn std::error::Error>> {
         // Call our own purge logic
         if clear { Self::purge_ram_macros(verbosity)?; }
@@ -1106,7 +1138,6 @@ pub trait AliasProvider {
     }
     fn setup_alias(verbosity: &Verbosity, queue: &TaskQueue) -> io::Result<()> {
         let mut parts: Vec<String> = Vec::new();
-        parts.push("--startup ".to_string());
 
         for task in &queue.tasks {
             // We skip Setup because it's the trigger, not the payload.
@@ -1139,14 +1170,12 @@ pub trait AliasProvider {
             .and_then(|s| s.to_str())
             .unwrap_or(&current_exe_name);
 
-        let current_canon = std::fs::canonicalize(&full_exe_path)
-            .map(normalize_path)
-            .unwrap_or_else(|_| normalize_path(full_exe_path.clone()));
+        let current_canon = canonicalize_resilient(&full_exe_path)
+            .unwrap_or_else(|| normalize_path(full_exe_path.clone()));
 
         let call_identifier = if let Some(found_path) = find_executable(search_name) {
-            let system_found_canon = std::fs::canonicalize(&found_path)
-                .map(normalize_path)
-                .unwrap_or_else(|_| normalize_path(found_path));
+            let system_found_canon = canonicalize_resilient(&found_path)
+                .unwrap_or_else(|| normalize_path(found_path));
 
             if current_canon == system_found_canon {
                 search_name.to_string()
@@ -1180,9 +1209,8 @@ pub trait AliasProvider {
             if !input.is_empty() {
                 let path = PathBuf::from(input);
                 if !path.exists() { std::fs::File::create(&path)?; }
-                let abs_path = std::fs::canonicalize(&path)
-                    .map(normalize_path)
-                    .unwrap_or_else(|_| normalize_path(path));
+                let abs_path = canonicalize_resilient(&path)
+                    .unwrap_or_else(|| normalize_path(path));
                 startup_command = format!("--file \"{}\"", abs_path);
             }
         }
@@ -1421,7 +1449,7 @@ pub fn parse_arguments(args: &[String]) -> (TaskQueue, Verbosity) {
                     skip_count = 1;
                     pivot_index = i + 2;
                 } else {
-
+                    queue.push(AliasAction::Invalid);
                     scream!(voice, AliasIcon::Alert, "--file requires a path");
                     pivot_index = i + 1;
                 }
@@ -1792,9 +1820,8 @@ pub fn open_editor(path: &Path, override_ed: Option<String>, verbosity: &Verbosi
     let mut profile = get_editor_preference(verbosity, &override_ed);
 
     // Canonicalize the target file
-    let absolute_path = path.canonicalize()
-        .map(normalize_path)
-        .unwrap_or_else(|_| normalize_path(path.to_path_buf()));
+    let absolute_path = canonicalize_resilient(path)
+        .unwrap_or_else(|| normalize_path(path.to_path_buf()));
 
     // RE-VALIDATION: Check again if the canonical path is somehow blocked
     match verify_read_readiness(&PathBuf::from(&absolute_path)) {
@@ -1870,12 +1897,17 @@ FLAGS:
     let eaf = std::env::var(ENV_ALIAS_FILE).unwrap_or_else(|_| "".to_string());
     let eao = std::env::var(ENV_ALIAS_OPTS).unwrap_or_else(|_| "".to_string());
     shout!(verbosity, AliasIcon::Environment, "ENVIRONMENT:");
-    shout!(verbosity, AliasIcon::None, "  {:<23} [{}] Path to your .doskey file", ENV_ALIAS_FILE, eaf);
-    shout!(verbosity, AliasIcon::None, "  {:<23} [{}] Default flags (e.g. \"--quiet\")\n", ENV_ALIAS_OPTS, eao);
+    shout!(verbosity, AliasIcon::None, "  {:<22} [{}] Path to your .doskey file", ENV_ALIAS_FILE, eaf);
+    shout!(verbosity, AliasIcon::None, "  {:<22} [{}] Default flags (e.g. \"--quiet\")\n", ENV_ALIAS_OPTS, eao);
 
     // 4. Footer Status
     if let Some(p) = path {
-        shout!(verbosity, AliasIcon::File, "  CURRENT FILE: {:<8}  {}", "", p.display());
+        if verbosity.level < VerbosityLevel::Normal {
+            shout!(verbosity, AliasIcon::File, "  CURRENT FILE: {:<7}  {}", "", p.display());
+            shout!(verbosity, AliasIcon::File, "  CURRENT FILE: {:<7}  {}", "", p.display());
+        } else {
+            shout!(verbosity, AliasIcon::File, "  CURRENT FILE: {:<5}  {}", "", p.display());
+        }
     } else {
         shout!(verbosity, "");
         shout!(verbosity, "CURRENT FILE: None (Set ALIAS_FILE to fix)");
@@ -1924,10 +1956,10 @@ pub fn mesh_logic(os_list: Vec<(String, String)>, file_list: Vec<(String, String
     mesh_list
 }
 
-pub fn perform_audit(os_pairs: Vec<(String, String)>, verbosity: &Verbosity) -> Result<(), Box<dyn std::error::Error>> {
+pub fn perform_audit(os_pairs: Vec<(String, String)>, verbosity: &Verbosity, provider: &ProviderType) -> Result<(), Box<dyn std::error::Error>> {
     let file_pairs = dump_alias_file(verbosity)?;
     let mesh = mesh_logic(os_pairs, file_pairs);
-    display_audit(&mesh, verbosity);
+    display_audit(&mesh, verbosity, provider);
     Ok(())
 }
 
@@ -1935,7 +1967,8 @@ pub fn perform_triple_audit(
     verbosity: &Verbosity,
     win32_pairs: Vec<(String, String)>,
     mut wrap_pairs: Vec<(String, String)>,
-    mut file_pairs: Vec<(String, String)>
+    mut file_pairs: Vec<(String, String)>,
+    provider: &ProviderType,
 ) {
     let mut desync_detected = false;
 
@@ -1957,7 +1990,7 @@ pub fn perform_triple_audit(
         let f_val = file_pairs.iter().position(|(n, _)| n == &name).map(|i| file_pairs.remove(i).1);
 
         // DISPLAY RAW: This preserves the "cxd=ehat? haha no" mess exactly as it is
-        verbosity.align(&name, &w_val, max_len, (true, d_val.is_some(), f_val.is_some()));
+        verbosity.align(&name, &w_val, max_len, (true, d_val.is_some(), f_val.is_some()), provider);
 
         // CHECK 1: Name Corruption (The serious work)
         if !is_valid_name(&name) {
@@ -1985,7 +2018,7 @@ pub fn perform_triple_audit(
     for (name, d_val) in wrap_pairs {
         let f_val = file_pairs.iter().position(|(n, _)| n == &name).map(|i| file_pairs.remove(i).1);
 
-        verbosity.align(&name, &d_val, max_len, (false, true, f_val.is_some()));
+        verbosity.align(&name, &d_val, max_len, (false, true, f_val.is_some()), provider);
         print!(" {}", text!(verbosity, AliasIcon::Alert, "<- PHANTOM (Not in Kernel)"));
 
         if !is_valid_name(&name) { print!(" !! CORRUPT"); }
@@ -1995,7 +2028,7 @@ pub fn perform_triple_audit(
 
     // 4. TERTIARY PASS: Pending Entries (In File, but not loaded into OS)
     for (name, f_val) in file_pairs {
-        verbosity.align(&name, &f_val, max_len, (false, false, true));
+        verbosity.align(&name, &f_val, max_len, (false, false, true), provider);
         print!(" {}", text!(verbosity, AliasIcon::Alert, "<- PENDING (Not in RAM)"));
 
         if !is_valid_name(&name) { print!(" !! CORRUPT"); }
@@ -2010,7 +2043,7 @@ pub fn perform_triple_audit(
     }
 }
 
-pub fn display_audit(mesh_list: &[AliasEntryMesh], verbosity: &Verbosity) {
+pub fn display_audit(mesh_list: &[AliasEntryMesh], verbosity: &Verbosity, provider: &ProviderType) {
     let mut desync_detected = false;
     let max_len = mesh_list.iter()
         .map(|e| {
@@ -2034,7 +2067,8 @@ pub fn display_audit(mesh_list: &[AliasEntryMesh], verbosity: &Verbosity) {
             &entry.name,
             os_val,
             max_len + 5,
-            (entry.os_value.is_some(), false, entry.file_value.is_some())
+            (entry.os_value.is_some(), false, entry.file_value.is_some()),
+            provider,
         );
 
         // 3. Print the corruption note if the name is illegal
@@ -2775,14 +2809,10 @@ pub fn check_path_integrity(path: &Path) -> PathIntegrity {
 fn is_viable_path(path: &Path) -> bool {
     // 1. Force Canonicalization
     // This turns short-names into long-names and validates the route
-    let canonical = match path.canonicalize() {
-        Ok(p) => p,
-        Err(_) => {
-            // If it doesn't exist, we can't canonicalize yet.
-            // Fall back to the "Can" check for new/mock files.
-            #[cfg(debug_assertions)]
-            trace!("can't canonize {:?}", path);
-            return !path.exists() && can_path_exist(path);
+    let canonical = match canonicalize_resilient(path) {
+        Some(p) => PathBuf::from(p),
+        None => {
+            path.to_path_buf()
         }
     };
     #[cfg(debug_assertions)]
@@ -2836,23 +2866,56 @@ pub fn can_path_exist(path: &Path) -> bool {
         std::fs::metadata(&dir_to_check).ok().map(|_| ())
     }).and_then(|inner| inner).is_some() // Use and_then to reach the real answer
 }
-#[cfg_attr(debug_assertions, named)]
 
+#[cfg_attr(debug_assertions, named)]
 pub fn resolve_viable_path(path: &PathBuf) -> Option<PathBuf> {
-    if is_viable_path(path) {
-        let clean_str = path.canonicalize()
-            .map(|p| normalize_path(p))
-            .unwrap_or_else(|_| normalize_path(path.clone()));
+    // 1. Check viability first.
+    // If this fails, we know the logic inside is_viable_path is the culprit.
+    if !is_viable_path(path) {
         #[cfg(debug_assertions)]
-        trace!("Resolved to {:?}", clean_str);
-        Some(PathBuf::from(clean_str))
-    } else {
-        #[cfg(debug_assertions)]
-        trace!("Didn't resolve.");
-        None
+        trace!("is_viable_path returned false for {:?}", path);
+        return None;
     }
+
+    // 2. Guard the canonicalize/normalize dance.
+    let path_clone = path.clone();
+    let result = canonicalize_resilient(&path_clone);
+
+    // 2. Match on the Option to decide the final 'canon' value
+    let canon = match result {
+        Some(s) if !s.is_empty() => {
+            #[cfg(debug_assertions)]
+            trace!("Resolved to: {}", s);
+            PathBuf::from(s)
+        }
+        _ => {
+            #[cfg(debug_assertions)]
+            trace!("Resilient resolution failed/timed out. Falling back.");
+            path_clone.clone() // This is your 'unwrap_or_else' logic moved inside
+        }
+    };
+    Some(canon)
 }
 
+pub fn canonicalize_resilient(path: &Path) -> Option<String> {
+    let mut threshold = IO_RESPONSIVENESS_THRESHOLD / 4;
+    let owned_path = path.to_path_buf(); // Create an owned copy here!
 
+    for attempt in 1..=3 {
+        let path_for_thread = owned_path.clone(); // Clone for each thread attempt
+        let result = timeout_guard(threshold, move || path_for_thread.canonicalize());
 
-
+        match result {
+            Some(Ok(resolved)) => {
+                let s = normalize_path(resolved);
+                if !s.is_empty() { return Some(s); }
+            }
+            _ => {
+                if attempt == 3 { break; }
+                std::thread::sleep(Duration::from_millis(25 * attempt));
+                threshold *= 2;
+            }
+        }
+    }
+    None
+}

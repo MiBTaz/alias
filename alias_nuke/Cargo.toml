@@ -1,10 +1,8 @@
 [package]
 name = "alias_nuke"
 version = "0.1.0"
-edition = "2024"
+authors.workspace = true
+edition.workspace = true
 
 [dependencies]
-windows-sys = { version = "0.52", features = [
-    "Win32_System_Console",
-    "Win32_Foundation"
-] }
+windows-sys = { workspace = true }

@@ -57,3 +57,32 @@ fn test_wrapper_passthrough_logic() {
     // This uses the 'assert' method from assert_cmd::prelude
     cmd.assert().success();
 }
+/*
+#[test]
+#[named]
+fn test_wrapper_preserves_internal_trailing_quotes() {
+    let name = "ncd_test";
+    let cmd = r#"for /f "delims=" %i in ('ncd.exe $*') do cd /d "%i""#;
+
+    // Define the different ways this alias might show up in doskey output
+    let test_cases = vec![
+        format!("{name}={cmd}"),               // Clean: Standard output
+        format!("\"{name}={cmd}\""),             // Dirty: Whole line quoted
+        format!(" {name}={cmd} "),               // Spaced: Extra whitespace
+        format!("\"{name}\"=\"{cmd}\""),         // Individually quoted parts
+    ];
+
+    let mut i = 1;
+    for mock_input in test_cases {
+        let results = alias_wrapper::parse_raw_doskey_output(&mock_input);
+        trace!("--> Iter #{}", i);
+        i += 1;
+        // Ensure we actually got a result back
+        let (parsed_name, parsed_value) = results.get(0)
+            .expect(&format!("Parser failed to extract alias from: {}", mock_input));
+
+        assert_eq!(parsed_name, name, "Name mismatch for input: {}", mock_input);
+        assert_eq!(parsed_value, cmd, "Value corrupted for input: {}", mock_input);
+    }
+}
+*/

@@ -18,6 +18,11 @@ serial_test = { workspace = true }
 alias_nuke = { workspace = true }
 ctor = { workspace = true }
 lazy_static = { workspace = true }
+windows-sys = { workspace = true }
 
 [features]
 test_utils = []
+identity_win32 = []
+
+[lints.rust]
+unexpected_cfgs = { level = "allow", check-cfg = ['cfg(feature, values("identity_win32", "identity_wrapper", "identity_hybrid", "test_utils"))'] }

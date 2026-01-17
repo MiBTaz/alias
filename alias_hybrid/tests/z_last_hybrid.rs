@@ -10,6 +10,30 @@ use alias_lib::*;
 #[allow(unused_imports)]
 use alias_lib::ShowFeature;
 
+#[path = "../../tests/state_restoration.rs"]
+mod stateful;
+#[cfg(test)]
+#[ctor::ctor]
+fn win32_local_tests_init() {
+    eprintln!("[PRE-FLIGHT] Warning: System state is starting.");
+    // FORCE LINKAGE: This prevents the linker from tree-shaking the module
+    // and silences the "unused" warnings by actually "using" them.
+    let _ = stateful::has_backup();
+    if stateful::is_stale() {
+        // This path probably won't be hit, but the compiler doesn't know that.
+        eprintln!("[PRE-FLIGHT] Warning: System state is stale.");
+    }
+    let _ = stateful::has_backup();
+    stateful::pre_flight_inc();
+    global_test_setup();
+}
+#[cfg(test)]
+#[ctor::dtor]
+fn win32_local_testsend() {
+    eprintln!("[POST-FLIGHT] Warning: System state is finished.");
+    stateful::post_flight_dec();
+}
+
 #[cfg(test)]
 #[ctor::ctor]
 fn init() {

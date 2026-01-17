@@ -84,7 +84,6 @@ impl AliasProvider for Win32LibraryInterface {
         }
         Ok(())
     }
-
     fn get_all_aliases(_verbosity: &Verbosity) -> io::Result<Vec<(String, String)>> {
         let exe_name = get_target_exe_wide();
 
@@ -199,7 +198,6 @@ impl AliasProvider for Win32LibraryInterface {
         shout!(verbosity, AliasIcon::Success, "AutoRun synchronized (Deduplicated & Position Preserved).");
         Ok(())
     }
-
     fn read_autorun_registry() -> String {
         let hkcu = RegKey::predef(HKEY_CURRENT_USER);
         // We open the key and get the value, defaulting to empty string on any error
@@ -207,7 +205,6 @@ impl AliasProvider for Win32LibraryInterface {
             .and_then(|key| key.get_value(REG_AUTORUN_KEY))
             .unwrap_or_default()
     }
-
     fn purge_ram_macros(verbosity: &Verbosity) -> io::Result<PurgeReport> {
         let mut report = PurgeReport { cleared: Vec::new(), failed: Vec::new() };
         // Now using ? on the getter
@@ -220,8 +217,6 @@ impl AliasProvider for Win32LibraryInterface {
         }
         Ok(report)
     }
-
-
     fn reload_full( verbosity: &Verbosity, path: &Path, clear: bool) -> Result<(), Box<dyn std::error::Error>> {
         if clear { Self::purge_ram_macros(verbosity)?; }
         // 1. Add '?' to percolate the error and get the Vec
@@ -239,7 +234,6 @@ impl AliasProvider for Win32LibraryInterface {
         whisper!(verbosity, AliasIcon::Success, "API Reload: {} macros injected.", count);
         Ok(())
     }
-
     fn query_alias(name: &str, verbosity: &Verbosity) -> Vec<String> {
         let search_target = name.to_lowercase();
 
@@ -259,7 +253,6 @@ impl AliasProvider for Win32LibraryInterface {
         // This return MUST match what your test is looking for: "not a known alias"
         vec![text!(verbosity, AliasIcon::Alert, "'{}' not found in Win32 RAM.", name)]
     }
-
     fn set_alias(opts: SetOptions, path: &Path, verbosity: &Verbosity) -> io::Result<()> {
         let name = if opts.force_case { opts.name.clone() } else { opts.name.to_lowercase() };
         let val_opt = if opts.value.is_empty() { None } else { Some(opts.value.as_str()) };
@@ -278,7 +271,6 @@ impl AliasProvider for Win32LibraryInterface {
         whisper!(verbosity, AliasIcon::Success, "{} alias: {}", if opts.value.is_empty() { "Deleted" } else { "Set" }, name);
         Ok(())
     }
-
     fn run_diagnostics(path: &Path, verbosity: &Verbosity) -> Result<(), Box<dyn std::error::Error>> {
         let report = DiagnosticReport {
             binary_path: env::current_exe().ok(),
@@ -294,16 +286,13 @@ impl AliasProvider for Win32LibraryInterface {
         render_diagnostics(report, verbosity);
         Ok(())
     }
-
     fn alias_show_all(verbosity: &Verbosity) -> Result<(), Box<dyn std::error::Error>> {
         let os_pairs = Self::get_all_aliases(verbosity)?;
-        perform_audit(os_pairs, verbosity)
+        perform_audit(os_pairs, verbosity, &Self::provider_type())
     }
-
     fn provider_type() -> ProviderType {
         ProviderType::Win32
     }
-
     fn is_api_responsive(timeout: Duration) -> bool {
         timeout_guard(timeout, || {
             let name = get_test_silo_name() + "\0";

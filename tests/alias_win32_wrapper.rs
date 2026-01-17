@@ -12,6 +12,9 @@ use serial_test::serial;
 use alias_lib::*;
 #[allow(unused_imports)]
 use alias_lib::{REG_SUBKEY, REG_AUTORUN_KEY};
+#[allow(unused_imports)]
+use function_name::named;
+
 extern crate alias_nuke;
 
 // shared code start
@@ -19,14 +22,39 @@ extern crate alias_lib;
 
 #[path = "shared_test_utils.rs"]
 mod test_suite_shared;
+
+
 #[allow(unused_imports)]
 use test_suite_shared::{MockProvider, MOCK_RAM, LAST_CALL, global_test_setup};
 
 // shared code end
-
+#[path = "state_restoration.rs"]
+mod stateful;
 #[cfg(test)]
 #[ctor::ctor]
-fn init_alias_win32_wrapper() { global_test_setup(); }
+fn local_library_tests_init() {
+    eprintln!("[PRE-FLIGHT] Warning: System state is starting.");
+    eprintln!("\n--- TEST ENVIRONMENT INITIALIZED ---");
+    eprintln!("Provider Identity: {:?}", <P as alias_lib::AliasProvider>::provider_type());
+    eprintln!("-----------------------------------\n");
+    // FORCE LINKAGE: This prevents the linker from tree-shaking the module
+    // and silences the "unused" warnings by actually "using" them.
+    let _ = stateful::has_backup();
+    if stateful::is_stale() {
+        // This path probably won't be hit, but the compiler doesn't know that.
+        eprintln!("[PRE-FLIGHT] Warning: System state is stale.");
+    }
+    let _ = stateful::has_backup();
+    stateful::pre_flight_inc();
+    global_test_setup();
+}
+#[cfg(test)]
+#[ctor::dtor]
+fn alias_lib_tests_end() {
+    eprintln!("[POST-FLIGHT] Warning: System state is finished.");
+    stateful::post_flight_dec();
+}
+
 
 macro_rules! skip_if_wrapper {
     () => {
@@ -126,8 +154,6 @@ fn test_routine_show_all() {
 fn test_v() -> Verbosity {
     voice!(Silent, ShowFeature::Off, ShowTips::Off)
 }
-
-
 
 #[test]
 #[serial]
@@ -350,19 +376,32 @@ fn test_routine_delete_sync() {
     let path = get_test_path("del");
     fs::write(&path, "ghost=gone\n").unwrap();
     P::raw_set_macro("ghost", Some("gone")).unwrap();
+
     let opts = SetOptions {
         name: "ghost".into(),
         value: "".into(),
         volatile: false,
         force_case: false,
     };
+
     P::set_alias(opts, &path, &Verbosity::normal()).unwrap();
-    let query = P::query_alias("ghost", &Verbosity::normal());
-    assert!(query.is_empty() || query[0].contains("not found"));
+
+    // SLEEPER AGENT COUNTER-MEASURE:
+    // We poll for up to 500ms to allow the File System and Win32 RAM to sync.
+    let mut success = false;
+    for _ in 0..10 {
+        let query = P::query_alias("ghost", &Verbosity::normal());
+        if query.is_empty() || query[0].contains("not found") {
+            success = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+
+    assert!(success, "Ghost alias persisted in file or RAM after deletion attempt");
 
     let _ = fs::remove_file(path);
 }
-
 #[test]
 #[serial]
 fn test_thread_silo_isolation() {
@@ -460,63 +499,59 @@ fn test_purge_stress_partial_failure() {
             "The report must capture the failure of the PROTECTED alias");
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+#[test]
+fn test_set_and_clear_poisoned_alias() {
+    let name = "\"ghost_test";
+    let val = "echo boo\"";
 
-    #[test]
-    fn test_set_and_clear_poisoned_alias() {
-        let name = "\"ghost_test";
-        let val = "echo boo\"";
+    // 1. Set it (should include quotes in RAM)
+    P::raw_set_macro(name, Some(val)).expect("Should set poisoned alias");
 
-        // 1. Set it (should include quotes in RAM)
-        P::raw_set_macro(name, Some(val)).expect("Should set poisoned alias");
-
-        // 2. Clear it (The critical fix: passing the same quoted name should delete it)
-        let result = P::raw_set_macro(name, None).expect("Should delete poisoned alias");
-        assert!(result, "Windows should report success for deletion of quoted name");
-    }
-
-
-    #[test]
-    fn test_xcd_trailing_quote_integrity() {
-        // 1. The Gatekeeper: Skip the "Slow Ship"
-        skip_if_wrapper!();
-
-        let name = "xcd_test";
-        // The raw string exactly as it appears in your working aliases file
-        let val = r#"for /f "delims=" %i in ('dir') do cd /d "%i""#;
-
-        // 2. The Action: Direct API call via Provider (P)
-        P::raw_set_macro(name, Some(val))
-            .expect("Win32 Kernel rejected the alias syntax");
-
-        // 3. The Forensic Check: Did the API store it correctly?
-        let ram = P::get_all_aliases(&Verbosity::loud()).expect("Failed to read back from RAM");
-
-        let (_, stored_val) = ram.iter()
-            .find(|(n, _)| n == name)
-            .expect("Alias disappeared from RAM immediately after set");
-
-        // 4. The "No-Murder" Assert
-        assert!(
-            stored_val.ends_with('"'),
-            "FAILURE: Trailing quote was stripped. Expected tail: [\"], Found: [{}]",
-            &stored_val[stored_val.len()-1..]
-        );
-
-        // Cleanup
-        let _ = P::raw_set_macro(name, None);
-    }
-
-
-    #[test]
-    fn test_alphanumeric_alias() {
-        // Standard case should still work perfectly
-        P::raw_set_macro("standard", Some("echo hello")).expect("Should set standard alias");
-        P::raw_set_macro("standard", None).expect("Should clear standard alias");
-    }
+    // 2. Clear it (The critical fix: passing the same quoted name should delete it)
+    let result = P::raw_set_macro(name, None).expect("Should delete poisoned alias");
+    assert!(result, "Windows should report success for deletion of quoted name");
 }
+
+
+#[test]
+fn test_xcd_trailing_quote_integrity() {
+    // 1. The Gatekeeper: Skip the "Slow Ship"
+    skip_if_wrapper!();
+
+    let name = "xcd_test";
+    // The raw string exactly as it appears in your working aliases file
+    let val = r#"for /f "delims=" %i in ('dir') do cd /d "%i""#;
+
+    // 2. The Action: Direct API call via Provider (P)
+    P::raw_set_macro(name, Some(val))
+        .expect("Win32 Kernel rejected the alias syntax");
+
+    // 3. The Forensic Check: Did the API store it correctly?
+    let ram = P::get_all_aliases(&Verbosity::loud()).expect("Failed to read back from RAM");
+
+    let (_, stored_val) = ram.iter()
+        .find(|(n, _)| n == name)
+        .expect("Alias disappeared from RAM immediately after set");
+
+    // 4. The "No-Murder" Assert
+    assert!(
+        stored_val.ends_with('"'),
+        "FAILURE: Trailing quote was stripped. Expected tail: [\"], Found: [{}]",
+        &stored_val[stored_val.len()-1..]
+    );
+
+    // Cleanup
+    let _ = P::raw_set_macro(name, None);
+}
+
+
+#[test]
+fn test_alphanumeric_alias() {
+    // Standard case should still work perfectly
+    P::raw_set_macro("standard", Some("echo hello")).expect("Should set standard alias");
+    P::raw_set_macro("standard", None).expect("Should clear standard alias");
+}
+
 
 #[test]
 #[serial]

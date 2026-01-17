@@ -1,109 +1,134 @@
+
 ---
 
 # alias.exe
 
 **The fast, safe, and modern alias manager for Windows CMD.**
 
-`alias` is a suite of tiny, statically-linked Rust utilities designed to replace messy batch files and manual `doskey` entries. It uses a **Triple-Audit Hybrid Engine** to ensure your shell macros are consistent across the Win32 Kernel, the active process, and the disk.
+`alias` is a production-grade suite of statically-linked Rust utilities designed to replace messy batch files and manual `doskey` entries. It utilizes a **Triple-Audit Hybrid Engine** to ensure shell macros remain 1:1 across the Win32 Kernel, the active process, and disk persistence.
 
 ---
 
-## 🏗 The Multi-Binary Suite
+## 🏗 The Multi-Binary Workspace
 
-When you compile the project, three distinct binaries are produced to suit different system needs:
+The project is structured as a modular workspace to ensure strict crate boundaries and platform-agnostic core logic.
 
-| Binary | Layer | Best For... |
+| Binary | Layer | Description |
 | --- | --- | --- |
-| `alias.exe` | **Hybrid** | **Daily Use.** The primary orchestrator that audits RAM, Process, and Disk simultaneously. |
-| `alias_win32.exe` | **Kernel** | Restricted environments where only direct `kernel32.dll` access is reliable. |
-| `alias_wrapper.exe` | **Process** | Compatibility mode for systems where `doskey.exe` behavior must be strictly mimicked. |
+| **`alias.exe`** | **Hybrid** | The primary orchestrator (from `alias_hybrid`) that attempts high-speed Win32 API calls with automatic `doskey` fallbacks.
+
+|
+| **`alias_win32.exe`** | **Kernel** | Specialized for direct `kernel32.dll` interop and direct console subsystem access.
+
+|
+| **`alias_wrapper.exe`** | **Process** | Legacy compatibility mode for strictly mimicking `doskey.exe` subprocess behavior.
+
+|
+| **`alias_nuke.exe`** | **Scrub** | A dedicated utility for low-level environment "nuking," physically clearing macros from the kernel.
+
+|
 
 ---
 
-## ✨ Features
+## ✨ Quantified Features
 
-* **Hybrid Sync:** Triple-verifies aliases between **Win32 RAM**, **Doskey Process**, and your **Macro File**.
-* **Static & Tiny:** ~283KB binaries. No DLLs, no runtimes, zero-cost abstractions.
-* **Deep Diagnostics:** Integrated `--which` mode checks drive health, registry sync, and drive latency.
-* **Resilient Memory:** **Loop & Grow** buffer management prevents crashes during high-density or international (UTF-16) alias reads.
-* **Safety First:** Prevents dangerous flag collisions and validates naming conventions.
-* **Live Reload:** Instantly pushes your disk file into the current shell session.
-
----
-
-## 🛠 Technical Architecture: The Triple-Audit
-
-To maintain "Intellectual Honesty" in your shell environment, the Hybrid Engine queries three distinct layers to find desyncs:
-
-1. **Win32 RAM (Kernel)**: Direct `kernel32.dll` calls (`GetConsoleAliasesW`) read exactly what the Windows console subsystem sees.
-2. **Doskey Wrapper (Process)**: A secondary check that queries the `doskey.exe` process to ensure the wrapper layer hasn't desynced.
-3. **Local Disk (Persistence)**: Resolves your `.doskey` macro file to ensure survival across reboots.
-
-If a layer fails (e.g., Access Denied to Kernel memory), the system **Screams** (captures the OS Error Code) and **Shouts** (reports the specific failure) but continues the audit using the remaining healthy sources.
-
----
-
-## 🚀 Quick Start
-
-1. Place your preferred `alias.exe` in your `\bin\` folder.
-2. Set your alias file location (e.g., via `setx` or in your profile):
-```cmd
-set ALIAS_FILE=V:\lbin\aliases
-
-```
+* **100% Test Fidelity**: Verified by a suite of **401 integration tests** across both Debug and Release profiles.
 
 
-3. **Bootstrap your shell:**
-```cmd
-alias alias="v:\lbin\alias.exe" $*
-alias aliases=alias $*
-alias --reload
-
-```
+* **High-Speed Merging**: Logic utilizes a `HashMap` for  identity checks during RAM-to-disk synchronization.
 
 
+* **Ultra-Lightweight**: Release binaries are optimized to ~700KB using LTO and symbol stripping.
+
+
+* **Triple-Audit Sync**: Simultaneously verifies state across **Win32 RAM**, **Doskey Cache**, and the **Local File**.
+
+
+* **Resilient Parsing**: Implements a "Literal Mirror" strategy to preserve internal quotes and fix the "XCD Tail Murder" bug.
+
+
+* **Hardened Security**: The `is_valid_name` gatekeeper prevents illegal shell character injections (`|`, `&`, `!`) as well as reserved names, such as CON AUX or PRN.
+
+
+* **Commands stack**: in the order given ```alias --reload --file my.aliases``` will reset your macros and load the ones in file.aliases. ```alias --file my.aliases --reload``` will load the aliases and then reset them
 
 ---
 
-## 📂 Usage
+## 🛠 Technical Architecture: The "Shared Brain"
+
+To maintain stability, all core logic resides in `alias_lib`, while the individual binaries act as thin wrappers.
+
+### The Triple-Audit Layers
+
+1.
+**Win32 RAM (Kernel)**: Uses `GetConsoleAliasesW` to read the true state of the Windows console subsystem.
+
+
+2.
+**Doskey Wrapper (Process)**: Queries the `doskey.exe` cache to identify "ghost" aliases that the API might miss.
+
+
+3.
+**Local Disk (Persistence)**: Ensures survival across reboots by managing your `.doskey` macro file.
+
+
+
+The system now uses **Reference-Based Verbosity** to avoid unnecessary memory clones while reporting diagnostics.
+
+---
+
+## 📂 Usage & Flags
 
 | Command | Description |
 | --- | --- |
-| `alias` | List all current macros (runs Triple-Audit) |
-| `alias name=value` | Create/Update an alias |
-| `alias name=` | Delete an alias |
-| `alias --reload` | Sync the shell with your `ALIAS_FILE` |
-| `alias --edalias` | Open your aliases in your `%EDITOR%` |
-| `alias --which` | Run system diagnostics (checks drive health/latency) |
+| `alias` | List all macros and perform a Triple-Audit.
+
+|
+| `alias name=value` | Create/Update an alias with strict name validation.
+
+|
+| `alias name=` | Perform a "Forensic Purge" to remove an alias from all layers.
+
+|
+| `alias --reload` | Instantly sync current RAM with your `ALIAS_FILE`. |
+| `alias --temp` | <br>**Volatile Mode**: Set an alias for the current session RAM only.
+
+|
+| `alias --force` | Preserve case-sensitivity during alias creation.
+
+|
+| `alias --which` | Run multi-layer diagnostics, including drive latency and API responsiveness.
+
+|
 
 ---
 
 ## ⚡ Power User: Sub-shell Navigation (`ncd`)
 
-If you use a custom navigator (like `ncd.exe`) for path jumps, use this specific pattern to handle the Windows sub-shell correctly. The quoting around the executable path is critical for resolving virtual (`subst`) drives.
-
-Note: due to cmd quoting difficulties, the best method to store this macro is with alias --edalias The code below is the unquoted, ready to copy&paste into your aliases version.  
-
+The new **"Literal but Clean"** parser ensures that complex directory navigation macros—like those using `ncd.exe`—do not suffer from trailing quote truncation.
+Note: multi quote commands still get murdered by cmd. The most reliable way to load them is via --file
 ```cmd
 cd=FOR /F "tokens=*" %i IN ('"v:\lbin\ncd.exe" $*') DO @(set "OLDPWD=%CD%" & chdir /d "%i")
 
 ```
 
-### 👻 Troubleshooting: "The system cannot find the drive specified"
+### 👻 Troubleshooting: Ghost Aliases
 
-If you encounter this error while using `cd` on virtual or `subst` drives:
-
-1. **Quote the Path:** Ensure the executable path is quoted inside the `FOR` loop: `'"v:\bin\tool.exe"'`.
-2. **Check Latency:** Run `alias --which`. If a drive is marked as **HUNG** or **TIMEOUT**, the sub-shell spawned by the `FOR` loop may fail to resolve the mapping before the process terminates.
+If you find aliases that won't disappear, it is likely a "ghost" entry starting with a corrupt quote. The `alias_hybrid` engine now detects these "ghosts" and uses the Win32 API to target and purge them specifically. --clear (or --reload) will remove them. 
 
 ---
 
 ## ⚙️ Build Info
 
-* **Language:** Rust 2021 Edition.
-* **Target:** `x86_64-pc-windows-msvc`.
-* **OS Support:** Windows 10/11 CMD (PowerShell and Bash not supported).
+*
+**Language**: Rust 2024 Edition (Workspace Resolver 3).
+
+
+*
+**Dependencies**: Hardened with `rustix`, `winreg`, and `serial_test` for thread-safe registry and API operations.
+
+
+* **Target**: `x86_64-pc-windows-msvc`.
 
 ---
 
-**Since you have three separate binaries now, would you like me to create a simple `build.bat` or `justfile` that compiles all three and moves them into a central `release/` folder automatically?**

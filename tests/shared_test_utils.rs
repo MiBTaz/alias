@@ -1,3 +1,5 @@
+// tests/shared_test_utils.rs
+
 #[allow(unused_imports)]
 use std::sync::Mutex;
 #[allow(unused_imports)]
@@ -8,7 +10,7 @@ use std::path::Path;
 use alias_lib::{AliasProvider, SetOptions, Verbosity, PurgeReport};
 #[allow(unused_imports)]
 use lazy_static::lazy_static;
-
+use alias_lib::ProviderType;
 
 // 1. SHARED MOCK STATE
 lazy_static! {
@@ -38,6 +40,22 @@ pub fn get_captured_set() -> SetOptions {
 
 #[allow(dead_code)]
 pub struct MockProvider;
+// Create an alias to the actual provider being tested
+// This allows the test file to just refer to "P"
+
+#[allow(unused_imports)]
+#[cfg(feature = "identity_win32")]
+pub use alias_win32::Win32Provider as P;
+
+#[allow(unused_imports)]
+#[cfg(feature = "identity_wrapper")]
+pub use alias_wrapper::WrapperLibraryInterface as P;
+
+#[allow(unused_imports)]
+#[cfg(feature = "identity_hybrid")]
+pub use alias_hybrid::WrapperLibraryInterface as P;
+
+#[allow(dead_code)]
 impl AliasProvider for MockProvider {
     // 1. ATOMIC HANDS
     fn raw_set_macro(name: &str, value: Option<&str>) -> io::Result<bool> {
@@ -96,6 +114,18 @@ impl AliasProvider for MockProvider {
     fn alias_show_all(_: &Verbosity) -> Result<(), Box<dyn std::error::Error>> { Ok(()) }
 
     fn install_autorun(_v: &Verbosity, _payload: &str) -> io::Result<()> { Ok(()) }
+
+    fn provider_type() -> ProviderType {
+        if cfg!(feature = "identity_wrapper") {
+            ProviderType::Wrapper
+        } else if cfg!(feature = "identity_hybrid") {
+            ProviderType::Hybrid
+        } else if cfg!(feature = "identity_win32") {
+            ProviderType::Win32
+        } else {
+            ProviderType::NotLinked
+        }
+    }
 }
 
 
