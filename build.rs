@@ -24,45 +24,54 @@ fn main_vars() {
     println!("cargo:rerun-if-changed=build.rs");
 }
 fn main_state() {
-    // Only manage system state during debug/test builds
     if std::env::var("PROFILE").unwrap_or_default() == "debug" {
+        // Respect the Mutex used by the tests
         let _lock = stateful::GlobalNamedMutex::acquire();
 
-        // 1. Cleanup Stale Backups
-        if stateful::has_backup() && stateful::is_stale() {
-            println!("cargo:warning=⚠️ Stale backup detected. Restoring and cleaning...");
-            // You would call your restore logic here
-            let hkcu = winreg::RegKey::predef(winreg::enums::HKEY_CURRENT_USER);
-            let _ = hkcu.delete_subkey_all(r"Software\AliasTool\Backup");
-        }
+        let hkcu = winreg::RegKey::predef(winreg::enums::HKEY_CURRENT_USER);
+        // Only overwrite if no tests are currently active
+        let current_count: u32 = hkcu.open_subkey(BACKUP_KEY_PATH)
+            .and_then(|k| k.get_value("ActiveCount")).unwrap_or(0);
 
-        // 2. Perform Initial Backup
-        if !stateful::has_backup() {
-            println!("cargo:warning=🔒 Creating System Backup for Test Run...");
+        if current_count == 0 {
+            if let Ok((key, _)) = hkcu.create_subkey(BACKUP_KEY_PATH) {
+                // 1. CAPTURE Golden Image (Vec<String> for MULTI_SZ)
+                let aliases = raw_get_all_aliases_as_strings();
+                let _ = key.set_value("Aliases", &aliases);
 
-            let hkcu = winreg::RegKey::predef(winreg::enums::HKEY_CURRENT_USER);
-            if let Ok((key, _)) = hkcu.create_subkey(r"Software\AliasTool\Backup") {
-                // A. Backup AutoRun (Raw winreg)
-                let run_key = hkcu.open_subkey(r"Software\Microsoft\Command Processor").ok();
-                let autorun: String = run_key.and_then(|k| k.get_value("AutoRun").ok()).unwrap_or_default();
+                // 2. CAPTURE AutoRun
+                let run_path = r"Software\Microsoft\Command Processor";
+                let autorun: String = hkcu.open_subkey(run_path)
+                    .and_then(|k| k.get_value("AutoRun")).unwrap_or_default();
                 let _ = key.set_value("AutoRun", &autorun);
 
-                // B. Clear System AutoRun so tests don't trigger it
-                if let Ok(k) = hkcu.open_subkey_with_flags(r"Software\Microsoft\Command Processor", winreg::enums::KEY_SET_VALUE) {
+                // 3. CLEAN ROOM setup
+                stateful::clear_all_macros(); // Targeted delete
+                if let Ok(k) = hkcu.open_subkey_with_flags(run_path, winreg::enums::KEY_SET_VALUE) {
                     let _ = k.set_value("AutoRun", &"");
                 }
 
-                // C. Backup RAM Aliases (Using our raw helper)
-                let aliases = stateful::raw_get_all_aliases();
-                let _ = stateful::write_multi_sz(r"Software\AliasTool\Backup", "Aliases", aliases);
-
-                // D. Nuke RAM Aliases for a clean test environment
-                stateful::raw_nuke_aliases();
-
-                // E. Initialize Semaphore
+                // Initialized and ready for tests
                 let _ = key.set_value("ActiveCount", &0u32);
             }
         }
+    }
+}
+
+// Helper for build.rs to get strings exactly how winreg wants them
+fn raw_get_all_aliases_as_strings() -> Vec<String> {
+    let mut buffer = vec![0u16; 65536];
+    unsafe {
+        let res = windows_sys::Win32::System::Console::GetConsoleAliasesW(
+            buffer.as_mut_ptr(), 131072, "cmd.exe\0".encode_utf16().collect::<Vec<_>>().as_ptr() as *mut _
+        );
+        if res == 0 { return vec![]; }
+        let char_count = (res as usize + 1) / 2;
+        String::from_utf16_lossy(&buffer[..char_count])
+            .split('\0')
+            .filter(|s| !s.is_empty() && s.contains('='))
+            .map(|s| s.to_string())
+            .collect()
     }
 }
 

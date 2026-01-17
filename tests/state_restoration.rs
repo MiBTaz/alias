@@ -92,23 +92,52 @@ pub fn post_flight_dec() {
         let count: u32 = key.get_value("ActiveCount").unwrap_or(0);
 
         if count <= 1 {
-            // Restore AutoRun
-            if let Ok(old_autorun) = key.get_value::<String, _>("AutoRun") {
-                if let Ok(run_key) = hkcu.open_subkey_with_flags(r"Software\Microsoft\Command Processor", KEY_SET_VALUE) {
-                    let _ = run_key.set_value("AutoRun", &old_autorun);
-                }
-            }
-            // Restore RAM
+            // RELOAD: Uses MULTI_SZ strings ("key=value")
             if let Ok(backup_aliases) = key.get_value::<Vec<String>, _>("Aliases") {
-                for pair in backup_aliases {
-                    if let Some((k, v)) = pair.split_once('=') {
+                clear_all_macros(); // Targeted scrub
+
+                for entry in backup_aliases {
+                    if let Some((k, v)) = entry.split_once('=') {
                         raw_add_alias(k, v);
                     }
                 }
             }
-            let _ = hkcu.delete_subkey_all(BACKUP_KEY_PATH);
+
+            // RESTORE AutoRun
+            if let Ok(old_autorun) = key.get_value::<String, _>("AutoRun") {
+                if let Ok(rk) = hkcu.open_subkey_with_flags(r"Software\Microsoft\Command Processor", KEY_SET_VALUE) {
+                    let _ = rk.set_value("AutoRun", &old_autorun);
+                }
+            }
+
+            // Anchor remains, count goes to zero
+            let _ = key.set_value("ActiveCount", &0u32);
         } else {
             let _ = key.set_value("ActiveCount", &(count - 1));
+        }
+    }
+}
+fn clear_all_macros() {
+    let mut buffer = vec![0u16; 65536];
+    let exe_name: Vec<u16> = "cmd.exe\0".encode_utf16().collect();
+    unsafe {
+        let result = windows_sys::Win32::System::Console::GetConsoleAliasesW(
+            buffer.as_mut_ptr(),
+            131072,
+            exe_name.as_ptr() as *mut u16,
+        );
+        if result > 0 {
+            let s = String::from_utf16_lossy(&buffer[..((result as usize + 1) / 2)]);
+            for pair in s.split('\0').filter(|x| !x.is_empty() && x.contains('=')) {
+                if let Some((k, _)) = pair.split_once('=') {
+                    // In Win32, AddConsoleAlias with NULL value deletes the alias
+                    windows_sys::Win32::System::Console::AddConsoleAliasW(
+                        format!("{}\0", k).encode_utf16().collect::<Vec<_>>().as_ptr() as *mut _,
+                        ptr::null_mut(), // THIS CLEARS IT
+                        exe_name.as_ptr() as *mut _
+                    );
+                }
+            }
         }
     }
 }
@@ -126,17 +155,12 @@ fn raw_add_alias(name: &str, value: &str) {
     }
 }
 
-// In stateful.rs
-
-/// Satisfies the compiler/tests: Checks if the backup key exists.
 pub fn has_backup() -> bool {
     winreg::RegKey::predef(winreg::enums::HKEY_CURRENT_USER)
         .open_subkey(r"Software\AliasTool\Backup")
         .is_ok()
 }
 
-/// Satisfies the compiler/tests: Returns if the state is stale.
-/// In the JOY version, we return false to keep things simple.
 pub fn is_stale() -> bool {
     false
 }

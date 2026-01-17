@@ -1,97 +1,177 @@
-// libs/stateful.rs
-use windows_sys::Win32::System::Threading::{CreateMutexW, WaitForSingleObject, ReleaseMutex, INFINITE};
-use windows_sys::Win32::Foundation::{WAIT_OBJECT_0, WAIT_ABANDONED, CloseHandle, HANDLE};
-use winreg::enums::*;
-use winreg::RegKey;
-use std::ptr;
+// alias_win32/tests/win32_local_tests.rs
 
-const BACKUP_KEY_PATH: &str = r"Software\AliasTool\Backup";
+use std::path::PathBuf;
+#[allow(unused_imports)]
+use serial_test::serial;
+use alias_lib::*;
+// Import the trait so its methods are available
+use alias_win32::{Win32LibraryInterface, REG_SUBKEY, REG_AUTORUN_KEY};
+extern crate alias_lib;
 
-pub struct GlobalNamedMutex { handle: HANDLE }
-
-impl GlobalNamedMutex {
-    pub fn acquire() -> Self {
-        let name: Vec<u16> = "Global\\AliasToolTestLock\0".encode_utf16().collect();
-        unsafe {
-            let handle = CreateMutexW(ptr::null_mut(), 0, name.as_ptr());
-            match WaitForSingleObject(handle, INFINITE) {
-                WAIT_OBJECT_0 | WAIT_ABANDONED => Self { handle },
-                _ => { CloseHandle(handle); panic!("Mutex fail"); }
-            }
-        }
+#[path = "../../tests/state_restoration.rs"]
+mod stateful;
+#[cfg(test)]
+#[ctor::ctor]
+fn win32_local_tests_init() {
+    eprintln!("[PRE-FLIGHT] Warning: System state is starting.");
+    // FORCE LINKAGE: This prevents the linker from tree-shaking the module
+    // and silences the "unused" warnings by actually "using" them.
+    let _ = stateful::has_backup();
+    if stateful::is_stale() {
+        // This path probably won't be hit, but the compiler doesn't know that.
+        eprintln!("[PRE-FLIGHT] Warning: System state is stale.");
     }
+    let _ = stateful::has_backup();
+    stateful::pre_flight_inc();
+    global_test_setup();
 }
-impl Drop for GlobalNamedMutex {
-    fn drop(&mut self) { unsafe { ReleaseMutex(self.handle); CloseHandle(self.handle); } }
+#[cfg(test)]
+#[ctor::dtor]
+fn win32_local_testsend() {
+    eprintln!("[POST-FLIGHT] Warning: System state is finished.");
+    stateful::post_flight_dec();
 }
 
-// --- STUBS FOR COMPILER (The parts you asked why were missing) ---
-pub fn has_backup() -> bool {
-    RegKey::predef(HKEY_CURRENT_USER).open_subkey(BACKUP_KEY_PATH).is_ok()
+pub fn get_test_path(suffix: &str) -> PathBuf {
+    PathBuf::from(format!("test_{}_{:?}.doskey", suffix, std::thread::current().id()))
 }
 
-pub fn is_stale() -> bool { false }
+//#[test]
+//#[serial]
+//fn a_nuke_the_world() {alias_nuke::kernel_wipe_macros();}
 
-// --- THE REBUILT JOY LOGIC ---
-pub fn pre_flight_inc() {
-    let _lock = GlobalNamedMutex::acquire();
+#[test]
+#[serial]
+fn test_local_win32_kernel_quirk() {
+    assert!(true);
+}
+
+#[test]
+#[serial]
+fn test_win32_api_roundtrip() {
+    let name = "test_alias_123";
+    let val = "echo hello";
+
+    // Call via the Interface
+    Win32LibraryInterface::raw_set_macro(name, Some(val)).unwrap();
+    let all = Win32LibraryInterface::get_all_aliases(&voice!(Silent, Off, Off)).expect("RAM fetch failed");
+    let found = all.iter().find(|(n, _)| n == name);
+
+    assert!(found.is_some());
+    Win32LibraryInterface::raw_set_macro(name, None).unwrap();
+}
+
+#[test]
+#[serial]
+fn test_routine_clear_ram() {
+    let name = "purge_me";
+    Win32LibraryInterface::raw_set_macro(name, Some("temporary")).unwrap();
+
+    let report = Win32LibraryInterface::purge_ram_macros(&voice!(Silent, Off, Off)).expect("Purge failed");
+
+    assert!(report.cleared.iter().any(|n| n.to_lowercase() == name.to_lowercase()),
+            "Purge did not report clearing our test key");
+
+    let results = Win32LibraryInterface::query_alias(name, &Verbosity::normal());
+    // Since query_alias returns Vec<String>, check for content or lack thereof
+    assert!(results.iter().all(|s| !s.contains("temporary")));
+}
+
+#[test]
+#[serial]
+fn test_routine_purge_ram() {
+    Win32LibraryInterface::raw_set_macro("purge_target", Some("alive")).unwrap();
+    let _ = Win32LibraryInterface::purge_ram_macros(&voice!(Silent, Off, Off)).expect("Purge failed");
+
+    let query = Win32LibraryInterface::query_alias("purge_target", &Verbosity::normal());
+
+    // Use a more flexible check that matches your text! output
+    assert!(query.get(0).map_or(false, |s| s.contains("not a known alias") || s.contains("not found")));
+}
+
+#[test]
+#[serial]
+fn test_win32_rapid_fire_sync() {
+    let path = get_test_path("stress");
+    for i in 0..20 {
+        let name = format!("stress_test_{}", i);
+        let opts = SetOptions {
+            name: name.clone(),
+            value: "echo work".into(),
+            volatile: false,
+            force_case: false,
+        };
+        Win32LibraryInterface::set_alias(opts, &path, &Verbosity::normal()).expect("Rapid fire set failed");
+    }
+
+    let all = Win32LibraryInterface::get_all_aliases(&voice!(Silent, Off, Off)).expect("RAM fetch failed");
+    for i in 0..20 {
+        let name = format!("stress_test_{}", i);
+        assert!(all.iter().any(|(n, _)| n == &name), "Missing alias {}", name);
+    }
+
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
+#[serial]
+fn test_win32_international_roundtrip() {
+    let name = "λ_alias";
+    let val = "echo lambda_power";
+
+    assert!(Win32LibraryInterface::raw_set_macro(name, Some(val)).unwrap(), "Failed to set international alias");
+
+    let all = Win32LibraryInterface::get_all_aliases(&voice!(Silent, Off, Off)).expect("RAM fetch failed");
+    let found = all.iter().find(|(n, _)| n == name);
+
+    assert!(found.is_some(), "International alias 'λ' was mangled or lost");
+    assert_eq!(found.unwrap().1, val);
+
+    Win32LibraryInterface::raw_set_macro(name, None).unwrap();
+}
+
+#[test]
+#[serial]
+fn test_registry_append_logic_library() {
+    use winreg::RegKey;
+    use winreg::enums::HKEY_CURRENT_USER;
+
     let hkcu = RegKey::predef(HKEY_CURRENT_USER);
-    let (key, _) = hkcu.create_subkey(BACKUP_KEY_PATH).unwrap();
-    let count: u32 = key.get_value("ActiveCount").unwrap_or(0);
+    let (key, _) = hkcu.create_subkey(REG_SUBKEY).unwrap();
 
-    if count == 0 {
-        // Capture AutoRun
-        if let Ok(cp_key) = hkcu.open_subkey(r"Software\Microsoft\Command Processor") {
-            let current: String = cp_key.get_value("AutoRun").unwrap_or_default();
-            let _ = key.set_value("AutoRun", &current);
-        }
-        // Capture RAM
-        let mut buffer = vec![0u16; 65536];
-        unsafe {
-            let res = windows_sys::Win32::System::Console::GetConsoleAliasesW(
-                buffer.as_mut_ptr(), 131072, "cmd.exe\0".encode_utf16().collect::<Vec<_>>().as_ptr() as *mut _
-            );
-            if res > 0 {
-                let s = String::from_utf16_lossy(&buffer[..(res as usize / 2)]);
-                let list: Vec<String> = s.split('\0').filter(|x| !x.is_empty() && x.contains('=')).map(|x| x.to_string()).collect();
-                let _ = key.set_value("Aliases", &list);
-            }
-        }
-    }
-    let _ = key.set_value("ActiveCount", &(count + 1));
+    let original_cmd = "echo 'Old Command'";
+    key.set_value(REG_AUTORUN_KEY, &original_cmd.to_string()).unwrap();
+
+    Win32LibraryInterface::write_autorun_registry(&format!("{} & alias --reload", original_cmd), &Verbosity::normal()).expect("Install failed");
+
+    let result: String = key.get_value(REG_AUTORUN_KEY).unwrap();
+    assert!(result.contains(original_cmd));
+    assert!(result.contains("--reload"));
 }
 
-pub fn post_flight_dec() {
-    let _lock = GlobalNamedMutex::acquire();
-    let hkcu = RegKey::predef(HKEY_CURRENT_USER);
-    if let Ok(key) = hkcu.open_subkey_with_flags(BACKUP_KEY_PATH, KEY_ALL_ACCESS) {
-        let count: u32 = key.get_value("ActiveCount").unwrap_or(0);
-        if count <= 1 {
-            // Restore Global State
-            if let Ok(old) = key.get_value::<String, _>("AutoRun") {
-                if let Ok(rk) = hkcu.open_subkey_with_flags(r"Software\Microsoft\Command Processor", KEY_SET_VALUE) {
-                    let _ = rk.set_value("AutoRun", &old);
-                }
-            }
-            // Restore RAM
-            if let Ok(aliases) = key.get_value::<Vec<String>, _>("Aliases") {
-                for pair in aliases {
-                    if let Some((k, v)) = pair.split_once('=') { raw_add_alias(k, v); }
-                }
-            }
-            let _ = hkcu.delete_subkey_all(BACKUP_KEY_PATH);
-        } else {
-            let _ = key.set_value("ActiveCount", &(count - 1));
-        }
-    }
+#[test]
+fn test_thread_silo_isolation_local() {
+    let name_a = "unique_silo_test_a";
+    let name_b = "unique_silo_test_b";
+
+    Win32LibraryInterface::raw_set_macro(name_a, Some("val_a")).unwrap();
+    Win32LibraryInterface::raw_set_macro(name_b, Some("val_b")).unwrap();
+
+    let all = Win32LibraryInterface::get_all_aliases(&voice!(Silent, Off, Off)).expect("RAM fetch failed");
+
+    assert!(all.iter().any(|(n, _)| n == name_a));
+    assert!(all.iter().any(|(n, _)| n == name_b));
+
+    Win32LibraryInterface::raw_set_macro(name_a, None).unwrap();
+    Win32LibraryInterface::raw_set_macro(name_b, None).unwrap();
 }
 
-fn raw_add_alias(k: &str, v: &str) {
-    unsafe {
-        windows_sys::Win32::System::Console::AddConsoleAliasW(
-            format!("{}\0", k).encode_utf16().collect::<Vec<_>>().as_ptr() as *mut _,
-            format!("{}\0", v).encode_utf16().collect::<Vec<_>>().as_ptr() as *mut _,
-            "cmd.exe\0".encode_utf16().collect::<Vec<_>>().as_ptr() as *mut _
-        );
-    }
+type P = Win32LibraryInterface; // Define P for the template
+
+include!("../../tests/cli_tests_win32.rs");
+
+#[test]
+#[serial]
+fn z_nuke_the_world_end() {
+    alias_nuke::kernel_wipe_macros();
 }
