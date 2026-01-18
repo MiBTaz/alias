@@ -10,6 +10,7 @@ use alias_wrapper::WrapperLibraryInterface;
 #[allow(unused_imports)]
 #[cfg(debug_assertions)]
 use function_name::named;
+include!(concat!(env!("OUT_DIR"), "/version_data.rs"));
 
 extern crate alias_lib;
 
@@ -162,5 +163,7 @@ impl AliasProvider for HybridLibraryInterface {
     fn provider_type() -> ProviderType {
         ProviderType::Hybrid
     }
-
+    fn get_version() -> &'static Versioning {
+        &VERSION
+    }
 }

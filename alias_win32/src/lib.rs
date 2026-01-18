@@ -16,6 +16,7 @@ pub use alias_lib::{REG_SUBKEY, REG_AUTORUN_KEY};
 #[allow(unused_imports)]
 #[cfg(debug_assertions)]
 use function_name::named;
+include!(concat!(env!("OUT_DIR"), "/version_data.rs"));
 
 fn get_test_silo_name() -> String {
     if env::var("ALIAS_TEST_BUCKET").is_ok() || cfg!(test) {
@@ -299,6 +300,10 @@ impl AliasProvider for Win32LibraryInterface {
             unsafe { GetConsoleAliasesLengthA(name.as_ptr()) };
             true // If it didn't hang, it's responsive
         }).unwrap_or(false)
+    }
+
+    fn get_version() -> &'static Versioning {
+        &VERSION
     }
 }
 

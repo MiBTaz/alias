@@ -210,6 +210,21 @@ pub const MAX_ALIAS_FILE_SIZE: usize = 1_500_000;
 pub const MAX_BINARY_FILE_SIZE: usize = 100_000_000;
 
 // --- Structs ---
+pub struct Versioning {
+    pub lib: &'static str,
+    pub major: u32,
+    pub minor: u32,
+    pub patch: u32,
+    pub compile: u32,
+    pub timestamp: &'static str,
+}
+impl Versioning {
+    pub fn current() -> &'static Self {
+        &VERSION
+    }
+}
+include!(concat!(env!("OUT_DIR"), "/version_data.rs"));
+
 #[derive(Debug)]
 pub struct AliasError {
     pub message: String,
@@ -360,7 +375,6 @@ pub enum PathIntegrity {
     Missing,      // Responsive but file not found
     Unresponsive, // Timeout/Hardware hang
 }
-
 
 #[derive(Debug, Clone, Copy)]
 #[repr(usize)]
@@ -1230,6 +1244,7 @@ pub trait AliasProvider {
         ProviderType::NotLinked
     }
     fn is_api_responsive(_timeout: Duration) -> bool { true }
+    fn get_version() -> &'static Versioning;
 }
 
 // --- Functions ---
@@ -1763,7 +1778,7 @@ pub fn dispatch<P: AliasProvider>(task: Task, verbosity: &Verbosity, ) -> Result
 
         // errors and mismatches
         AliasAction::Invalid => {
-            scream!(verbosity, AliasIcon::Alert, "Invalid command state.");
+            scream!(verbosity, AliasIcon::Alert, "Invalid command state.\nDid you use an alias flag in an implicit alias? try quoting the RHS or using --");
             print_help(verbosity, HelpMode::Short, Some(path));
         }
         AliasAction::Fail => {

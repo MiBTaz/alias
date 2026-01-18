@@ -9,6 +9,7 @@ use alias_lib::*;
 #[allow(unused_imports)]
 #[cfg(debug_assertions)]
 use function_name::named;
+include!(concat!(env!("OUT_DIR"), "/version_data.rs"));
 
 extern crate alias_lib;
 
@@ -243,6 +244,10 @@ impl alias_lib::AliasProvider for WrapperLibraryInterface {
     fn provider_type() -> ProviderType { ProviderType::Wrapper  }
     fn is_api_responsive(_timeout: Duration) -> bool {
         true
+    }
+
+    fn get_version() -> &'static Versioning {
+        &VERSION
     }
 }
 
