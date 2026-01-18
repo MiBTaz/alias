@@ -1,5 +1,6 @@
 // alias_wrapper/tests/wrapper_local_tests.rs
 
+#[allow(unused_imports)]
 use function_name::named;
 use alias_lib::*;
 use serial_test::serial;

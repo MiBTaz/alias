@@ -187,11 +187,7 @@ const REG_CURRENT_USER: &str = "HKCU";
 const PATH_SEPARATOR: &str = r"\";
 pub const UNC_GLOBAL_PATH: &str = r"\\?\UNC\";
 pub const UNC_PATH: &str = r"\\?\";
-//#[cfg(not(test))]
 pub const REG_SUBKEY: &str = r"Software\Microsoft\Command Processor";
-//#[cfg(test)]
-//pub const REG_SUBKEY: &str = r"Software\AliasTool\Temp\Command Processor";
-
 pub const REG_AUTORUN_KEY: &str = "AutoRun";
 pub const ENV_ALIAS_FILE: &str = "ALIAS_FILE";
 pub const ENV_ALIAS_OPTS: &str = "ALIAS_OPTS";
