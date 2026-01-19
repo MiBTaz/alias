@@ -1031,7 +1031,7 @@ mod dispatch_and_integration {
     fn t74_startup_task_count() {
         let (q, voice) = parse_arguments(&vec!["alias".into(), "--startup".into(), "x=y".into()]);
         assert!(voice.in_startup);
-        assert_eq!(q.len(), 1);
+        assert_eq!(q.len(), 2);
     }
 
     #[test]

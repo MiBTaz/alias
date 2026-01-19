@@ -1,6 +1,5 @@
 // alias_lib/src/lib.rs
 
-
 // --- Includes ---
 use std::{env, fmt};
 use std::fs;
@@ -17,6 +16,64 @@ use std::str::FromStr;
 #[allow(unused_imports)]
 #[cfg(debug_assertions)]
 use function_name::named;
+
+#[path = "../../versioning.rs"]
+pub mod versioning;
+pub use versioning::{Versioning};
+// keep this BELOW Versioning or boom!
+include!(concat!(env!("OUT_DIR"), "/version_data.rs"));
+// This pulls in the aggregate calculated by the root build.rs
+impl Versioning {
+    pub fn current() -> &'static Self {
+        &VERSION
+    }
+}
+impl Versioning {
+    pub fn display_versions(verbosity: &Verbosity, versions: &[&'static Self]) {
+        Self::display_short_version(verbosity, true, versions);
+        let separator = "-".repeat(65);
+        scream!(verbosity, AliasIcon::None, "{}", &separator);
+        scream!(verbosity, AliasIcon::None, "{:<16} | {:<10} | {:<8} | {:<15}", "Component", "Version", "Build", "Timestamp");
+        scream!(verbosity, AliasIcon::None, "{}", &separator);
+
+        for v in versions {
+            let version_str = format!("v{}.{}.{}", v.major, v.minor, v.patch);
+
+            scream!(verbosity, AliasIcon::None,
+                "{:<16} | {:<10} | {:<8} | {:<15}",
+                v.lib,
+                version_str,
+                v.compile,
+                v.timestamp
+            );
+        }
+        scream!(verbosity, AliasIcon::None, "{}", separator);
+    }
+    pub fn display_short_version(verbosity: &Verbosity, stderr: bool, versions: &[&'static Self]) {
+        if versions.is_empty() { return; }
+
+        let exe_name = get_alias_exe_nofail(verbosity);
+        let core = versions[0];
+        let host = versions[versions.len() - 1];
+        let version = format!("{} v{}.{}.{} ({} v{}.{}.{} build {})",
+                              exe_name, core.major, core.minor, core.patch,
+                              host.lib, host.major, host.minor, host.patch, host.compile);
+
+
+        // alias_lib v0.5.2 (alias v0.0.4 build 339)
+        if stderr == false {
+            shout!(verbosity, AliasIcon::Question, "{}", version);
+        } else {
+            scream!(verbosity, AliasIcon::Question, "{}", version);
+        }
+    }
+}
+include!("../../generated_overall.rs");
+impl Versioning {
+    pub const fn system_reality() -> &'static Self {
+        &SYSTEM_REALITY
+    }
+}
 
 // --- Macros ---
 #[macro_export]
@@ -211,37 +268,6 @@ pub const MAX_ALIAS_FILE_SIZE: usize = 1_500_000;
 pub const MAX_BINARY_FILE_SIZE: usize = 100_000_000;
 
 // --- Structs ---
-pub struct Versioning {
-    pub lib: &'static str,
-    pub major: u32,
-    pub minor: u32,
-    pub patch: u32,
-    pub compile: u32,
-    pub timestamp: &'static str,
-}
-// keep this BELOW Versioning or boom!
-include!(concat!(env!("OUT_DIR"), "/version_data.rs"));
-impl Versioning {
-    pub fn current() -> &'static Self {
-        &VERSION
-    }
-}
-impl Versioning {
-    pub fn display_versions(versions: impl IntoIterator<Item = &'static Self>) {
-        println!("{:-<65}", "");
-        println!("{:<16} | {:<10} | {:<8} | {:<15}", "Component", "Version", "Build", "Timestamp");
-        println!("{:-<65}", "");
-
-        for v in versions {
-            println!(
-                "{:<16} | v{}.{}.{:<2} | {:<8} | {:<15}",
-                v.lib, v.major, v.minor, v.patch, v.compile, v.timestamp
-            );
-        }
-        println!("{:-<65}", "");
-    }
-}
-
 #[derive(Debug)]
 pub struct AliasError {
     pub message: String,
@@ -793,6 +819,7 @@ pub enum AliasAction {
     Remove(SetOptions),
     Unalias(SetOptions),
     Version,
+    VersionShort,
     Which,
     Toggle(Box<AliasAction>, bool),
 }
@@ -811,6 +838,7 @@ impl AliasAction {
             AliasAction::Temp              => "--temp".to_string(),
             AliasAction::NoTemp            => "--no-temp".to_string(),
             AliasAction::Version           => "--version".to_string(),
+            AliasAction::VersionShort      => "--ver".to_string(),
             AliasAction::Which             => "--which".to_string(),
 
             // --- The Symmetric Toggles ---
@@ -952,6 +980,8 @@ impl FromStr for AliasAction {
             "--startup"                 => Ok(if is_negated { Self::Invalid } else { Self::Startup }),
             "--clear"                   => Ok(if is_negated { Self::Invalid } else { Self::Clear }),
             "--which"                   => Ok(if is_negated { Self::Invalid } else { Self::Which }),
+            "--ver"                     => Ok(if is_negated { Self::Invalid } else { Self::VersionShort }),
+            "--version"                 => Ok(if is_negated { Self::Invalid } else { Self::Version }),
             "--edalias" | "--edaliases" => Ok(if is_negated { Self::Invalid } else { Self::Edit(None) }),
             "--show-all"                => Ok(if is_negated { Self::Invalid } else { Self::ShowAll }),
             "--file"                    => Ok(if is_negated { Self::Invalid } else { Self::File }),
@@ -994,6 +1024,7 @@ impl fmt::Display for AliasAction {
                 else { write!(f, "--unalias {}", opts.name) }
             },
             Self::Version               => write!(f, "--version"),
+            Self::VersionShort          => write!(f, "--ver"),
             Self::Which                 => write!(f, "--which"),
             // options the actually have ro CLI
             Self::Fail                  => write!(f, "--fail"),
@@ -1036,6 +1067,7 @@ impl<'a> std::fmt::Display for AliasErrorString<'a> {
             AliasAction::NoTemp => write!(f, "Error setting/using process as dual (mem/disk))"),
             AliasAction::Unalias(opts) => write!(f, "Error unaliasing alias: {}", opts.name),
             AliasAction::Version => write!(f, "Error getting versions"),
+            AliasAction::VersionShort => write!(f, "Error getting versions"),
             AliasAction::Which => write!(f, "Error running diagnostics"),
             AliasAction::Quiet => write!(f, "Error setting/using quiet mode"),
             AliasAction::NoQuiet => write!(f, "Error unsetting/disabling quiet mode"),
@@ -1378,7 +1410,16 @@ pub fn run<P: AliasProvider>(mut args: Vec<String>) -> Result<(), Box<dyn std::e
 // Logic Block 1: Flag Harvesting.
 // Logic Block 2: Sticky Path / Context Resolution (Hydrating the Task.path).
 // Logic Block 3: Greedy Payload Collection.
-#[cfg_attr(debug_assertions, named)]
+macro_rules! parse_continue {
+    ($pivot:ident, $i:ident) => {
+        $pivot = $i + 1;
+        continue;
+    };
+    ($pivot:ident, $i:ident, $offset:expr) => {
+        $pivot = $i + $offset;
+        continue;
+    };
+}#[cfg_attr(debug_assertions, named)]
 pub fn parse_arguments(args: &[String]) -> (TaskQueue, Verbosity) {
     let mut queue = TaskQueue::new();
     let mut voice = Verbosity::loud();
@@ -1404,62 +1445,77 @@ pub fn parse_arguments(args: &[String]) -> (TaskQueue, Verbosity) {
         // 2. The Semantic Trigger
         let trigger = AliasAction::intent(arg);
         match trigger {
-            // Punch-out Intent
             AliasAction::Help => {
                 queue.clear();
                 queue.push_file(AliasAction::Help, get_alias_path("").unwrap());
                 return (queue, voice);
             }
-            // Setup Intent
+            AliasAction::Version=> {
+                queue.clear();
+                queue.push(AliasAction::Version);
+                return (queue, voice);
+            }
+            AliasAction::VersionShort=> {
+                queue.clear();
+                queue.push(AliasAction::VersionShort);
+                return (queue, voice);
+            }
             AliasAction::Setup => {
                 voice.in_setup = true;
                 if !queue.is_empty() {
                     setup_failure!(voice, queue, "Error: --setup must be the first command.", arg);
                 }
                 queue.push(AliasAction::Setup);
-                continue;
+                parse_continue!(pivot_index, i);
             }
-            // Modifiers (These don't push to queue, just change local state)
-            AliasAction::Icons   => { voice.show_icons = ShowFeature::On; continue; },
-            AliasAction::NoIcons => { voice.show_icons = ShowFeature::Off; continue; },
-            AliasAction::Tips => { voice.show_icons = ShowFeature::On; continue; },
-            AliasAction::NoTips  => { voice.show_tips = ShowTips::Off; continue; },
-            AliasAction::Quiet => { voice.level = VerbosityLevel::Silent; voice.show_icons = ShowFeature::Off; continue; },
-            AliasAction::NoQuiet => { voice.level = VerbosityLevel::Normal; voice.show_icons = ShowFeature::On; continue; },
-            AliasAction::Temp => { volatile = true; continue; },
-            AliasAction::NoTemp => { volatile = false; continue; },
-            AliasAction::Case => { force_case = true; continue; },
-            AliasAction::NoCase => { force_case = false; continue; },
+
+            // Modifiers
+            AliasAction::Icons   => { voice.show_icons = ShowFeature::On; parse_continue!(pivot_index, i); },
+            AliasAction::NoIcons => { voice.show_icons = ShowFeature::Off; parse_continue!(pivot_index, i); },
+            AliasAction::Tips    => { voice.show_icons = ShowFeature::On; parse_continue!(pivot_index, i); },
+            AliasAction::NoTips  => { voice.show_tips = ShowTips::Off; parse_continue!(pivot_index, i); },
+            AliasAction::Quiet   => {
+                voice.level = VerbosityLevel::Silent;
+                voice.show_icons = ShowFeature::Off;
+                parse_continue!(pivot_index, i);
+            },
+            AliasAction::NoQuiet => {
+                voice.level = VerbosityLevel::Normal;
+                voice.show_icons = ShowFeature::On;
+                parse_continue!(pivot_index, i);
+            },
+            AliasAction::Temp    => { volatile = true; parse_continue!(pivot_index, i); },
+            AliasAction::NoTemp  => { volatile = false; parse_continue!(pivot_index, i); },
+            AliasAction::Case    => { force_case = true; parse_continue!(pivot_index, i); },
+            AliasAction::NoCase  => { force_case = false; parse_continue!(pivot_index, i); },
+
             AliasAction::Startup => {
                 if voice.in_setup { setup_failure!(voice, queue, arg); }
                 voice = voice!(Mute, Off, Off);
                 voice.in_startup = true;
                 queue.push(AliasAction::Startup);
-                continue;
+                parse_continue!(pivot_index, i);
             }
-            // the inline explicit alias setter.
+
             AliasAction::Set(_) => {
                 if voice.in_setup { setup_failure!(voice, queue, arg); }
-                // if arg != "--set" { pivot_index = i; break; }
                 if !AliasAction::is_switch(arg) { pivot_index = i; break; }
                 let next_idx = i + 1;
                 if let Some(_payload_start) = args.get(next_idx) {
                     let (action, consumed) = parse_set_argument(&voice, &args[next_idx..], volatile, force_case, is_literal);
                     queue.push(action);
                     skip_count = consumed;
-                    pivot_index = i + 1 + consumed;
-                    continue;
+                    parse_continue!(pivot_index, i, 1 + consumed);
                 } else {
                     scream!(voice, AliasIcon::Alert, "--set requires a name=value pair");
                     queue.push(AliasAction::Fail);
+                    parse_continue!(pivot_index, i);
                 }
-                continue;
             },
-            // The Consuming Intent (Triggers your existing logic)
+
             AliasAction::File => {
                 let mut invalidate = false;
                 if let Some(path_str) = args.get(i + 1) {
-                    // semaphore. always set. never blindly use.
                     custom_path = PathBuf::from(path_str);
                     let raw_p = PathBuf::from(path_str);
                     let resolved = resolve_viable_path(&raw_p);
@@ -1471,33 +1527,24 @@ pub fn parse_arguments(args: &[String]) -> (TaskQueue, Verbosity) {
                     }
                     for task in queue.tasks.iter_mut().rev() {
                         if task.action == AliasAction::File { break; }
-
-                        if !invalidate {
-                            task.path = custom_path.clone();
-                        } else {
-                            if task.action.requires_file() {
-                                task.action = AliasAction::Fail;
-                            }
-                        }
+                        if !invalidate { task.path = custom_path.clone(); }
+                        else if task.action.requires_file() { task.action = AliasAction::Fail; }
                     }
-                    //let action = if invalidate { AliasAction::Fail } else { AliasAction::File };
                     queue.push_file(AliasAction::File, raw_p);
                     skip_count = 1;
-                    pivot_index = i + 2;
+                    parse_continue!(pivot_index, i, 2);
                 } else {
                     queue.push(AliasAction::Invalid);
                     scream!(voice, AliasIcon::Alert, "--file requires a path");
-                    pivot_index = i + 1;
+                    parse_continue!(pivot_index, i);
                 }
-                continue;
             }
+
             AliasAction::Unalias(_) | AliasAction::Remove(_) => {
                 if voice.in_setup { setup_failure!(voice, queue, arg); }
-                pivot_index = i + 1;
-                if let Some(next) = args.get(pivot_index) {
+                let target_idx = i + 1;
+                if let Some(next) = args.get(target_idx) {
                     let next_intent = AliasAction::intent(next);
-
-                    // If the next thing is just a Query (a name), we harvest it
                     if matches!(next_intent, AliasAction::Query(_)) && is_valid_name(next) {
                         let harvested = if matches!(trigger, AliasAction::Unalias(_)) {
                             AliasAction::Unalias( SetOptions::volatile(next.clone(), force_case) )
@@ -1506,47 +1553,49 @@ pub fn parse_arguments(args: &[String]) -> (TaskQueue, Verbosity) {
                         };
                         queue.push(harvested);
                         skip_count = 1;
-                        pivot_index = i + 2;
-                        continue;
+                        parse_continue!(pivot_index, i, 2);
                     }
                 }
                 scream!(voice, AliasIcon::Alert, "{} requires a valid target", arg);
                 queue.push(AliasAction::Fail);
-                continue;
+                parse_continue!(pivot_index, i);
             },
-            // Task-generating Intents
-            AliasAction::Reload => { queue.push(AliasAction::Reload); pivot_index = i + 1; continue;},
-            AliasAction::Which => { queue.push(AliasAction::Which); pivot_index = i + 1; continue;},
-            AliasAction::Clear => { queue.push(AliasAction::Clear); pivot_index = i + 1; continue;},
-            AliasAction::ShowAll => { queue.push(AliasAction::ShowAll); pivot_index = i + 1; continue;},
-            // Use the data captured by intent() for parameterized flags
+
+            AliasAction::Reload  => { queue.push(AliasAction::Reload);  parse_continue!(pivot_index, i); },
+            AliasAction::Which   => { queue.push(AliasAction::Which);   parse_continue!(pivot_index, i); },
+            AliasAction::Clear   => { queue.push(AliasAction::Clear);   parse_continue!(pivot_index, i); },
+            AliasAction::ShowAll => { queue.push(AliasAction::ShowAll); parse_continue!(pivot_index, i); },
+
             AliasAction::Edit(val) => {
                 if voice.in_setup { setup_failure!(voice, queue, arg); }
                 queue.push(AliasAction::Edit(val));
-                pivot_index = i + 1;
-                continue;
+                parse_continue!(pivot_index, i);
             }
+
             _ => {
                 if voice.in_setup { setup_failure!(voice, queue, arg); }
 
-                // If intent() marked it Invalid but it starts with --, it's a bad flag
+                // Check for garbage flags (starts with -- but failed intent check)
                 if matches!(trigger, AliasAction::Invalid) && arg.starts_with("--") {
                     scream!(voice, AliasIcon::Alert, "Unknown option: {}", arg);
                     saw_unknown = true;
-                    pivot_index = i + 1;
+
+                    // --- THE MISSING LINK ---
+                    // Push an Invalid task so the queue matches the error logged
                     queue.push_file(AliasAction::Invalid, PathBuf::from(""));
-                    continue;
+
+                    parse_continue!(pivot_index, i);
                 }
 
                 // Otherwise, check if it's the start of the payload
                 let potential_name = arg.split('=').next().unwrap_or(arg);
                 if is_valid_name(potential_name) {
                     pivot_index = i;
-                    break; // PIVOT: Step 2
+                    break; // PIVOT: Handover to Step 2
                 } else {
                     scream!(voice, AliasIcon::Alert, "Illegal command start: '{}'", arg);
                     queue.push(AliasAction::Invalid);
-                    pivot_index = i + 1;
+                    parse_continue!(pivot_index, i);
                 }
             }
         }
@@ -1798,7 +1847,11 @@ pub fn dispatch<P: AliasProvider>(task: Task, verbosity: &Verbosity, ) -> Result
         }
         AliasAction::Version => {
             let library_versions = P::get_versions();
-            Versioning::display_versions(library_versions);
+            Versioning::display_versions(verbosity, &library_versions);
+        }
+        AliasAction::VersionShort => {
+            let library_versions = P::get_versions();
+            Versioning::display_short_version(verbosity, false, &library_versions);
         }
         AliasAction::Which => {
             P::alias_show_all(verbosity)?;

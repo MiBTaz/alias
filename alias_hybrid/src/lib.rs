@@ -1,7 +1,5 @@
 // alias_hybrid/src/lib.rs
 
-extern crate function_name;
-
 use std::io;
 use std::path::Path;
 use alias_lib::*;

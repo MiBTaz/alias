@@ -1,4 +1,9 @@
 # V:\Projects\alias\Cargo.toml
+[package-x]
+name = "alias-project"
+version = "0.10.0"
+edition = "2024"
+
 [workspace.package]
 authors = ["G. Anthony Davis"]
 version = "0.10.0"

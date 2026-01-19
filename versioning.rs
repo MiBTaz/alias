@@ -1,9 +1,19 @@
 // versioning.rs
-
 use std::process::Command;
 use std::fs;
 use std::path::Path;
 use std::env;
+
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+pub struct Versioning {
+    pub lib: &'static str,
+    pub major: u32,
+    pub minor: u32,
+    pub patch: u32,
+    pub compile: u32,
+    pub timestamp: &'static str,
+}
 
 pub fn create_versioning() {
     let out_dir = env::var("OUT_DIR").unwrap();
@@ -19,6 +29,24 @@ pub fn create_versioning() {
         .output()
         .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
         .unwrap_or_else(|_| ".".into());
+
+    // --- THE HASH GATE ---
+    // Get current HEAD hash
+    let current_hash = Command::new("git")
+        .current_dir(&repo_root)
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_else(|_| "unknown".into());
+
+    let fingerprint_path = Path::new(&out_dir).join("last_git_hash.txt");
+    let last_hash = fs::read_to_string(&fingerprint_path).unwrap_or_default();
+
+    // If hash matches, the "Reality" hasn't changed. Exit now.
+    if current_hash == last_hash && current_hash != "unknown" {
+        return;
+    }
+    // ---------------------
 
     let git_pathspec = format!("{}/src/lib.rs", folder_name);
 
@@ -45,7 +73,6 @@ pub fn create_versioning() {
     let mut total_logic_churn = 0;
 
     if !hashes.is_empty() {
-        // Find the "Floor" (First commit of the file)
         let first_commit = Command::new("git")
             .current_dir(&repo_root)
             .args(["rev-list", "--max-parents=0", "HEAD"])
@@ -73,7 +100,6 @@ pub fn create_versioning() {
             for line in text.lines() {
                 if (line.starts_with('+') || line.starts_with('-')) && !line.starts_with("+++") && !line.starts_with("---") {
                     let content = line[1..].trim();
-                    // Ignore comments and markers
                     if content.is_empty() || content.starts_with("//") || content.starts_with("/*") || content.starts_with('*') {
                         continue;
                     }
@@ -83,7 +109,6 @@ pub fn create_versioning() {
                     }
                 }
             }
-            // Version bumping logic
             if constructive_adds >= 100 { total_minor += 1; }
             else if constructive_adds >= 10 { total_patch += 1; }
         }
@@ -117,8 +142,12 @@ pub fn create_versioning() {
     let dest_path = Path::new(&out_dir).join("version_data.rs");
     fs::write(&dest_path, version_code).unwrap();
 
+    // Update fingerprint so we don't run again until the next commit
+    fs::write(&fingerprint_path, current_hash).unwrap();
+
     // 6. Cargo Protocols
-    println!("cargo:rerun-if-changed=.git/index");
+    // Use .git/HEAD for commit changes and src/lib.rs for local dirty edits
+    println!("cargo:rerun-if-changed=.git/HEAD");
     println!("cargo:rerun-if-changed=src/lib.rs");
 
     // FINAL AUDIT
@@ -127,3 +156,4 @@ pub fn create_versioning() {
         pkg_name, major, total_minor, total_patch, total_logic_churn, timestamp
     );
 }
+

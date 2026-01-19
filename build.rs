@@ -3,13 +3,36 @@ use std::process::Command;
 
 #[path = "tests/state_restoration.rs"]
 mod stateful;
+#[path = "versioning.rs"] // Or wherever you have it centralized
+mod versioning;
+use versioning::Versioning;
 
 fn main() {
-    // Trigger re-run only if files change
-    // println!("cargo:rerun-if-changed=.git/HEAD");
+    println!("cargo:rerun-if-changed=alias_hybrid\\src\\lib.rs");
+    println!("cargo:rerun-if-changed=alias_lib\\src\\lib.rs");
+    println!("cargo:rerun-if-changed=alias_lib\\tests\\library_tests.rs");
+    println!("cargo:rerun-if-changed=alias_win32\\src\\lib.rs");
+    println!("cargo:rerun-if-changed=alias_wrapper\\src\\lib.rs");
+    println!("cargo:rerun-if-changed=../alias_lib/src");
+    println!("cargo:rerun-if-changed=../alias_win32/src");
+    println!("cargo:rerun-if-changed=../alias_wrapper/src");
+
+    // 1. BOOTSTRAP: Write a valid file IMMEDIATELY if it's empty or missing
+    // This allows the following 'cargo check' to actually pass.
+    seed_overall_if_needed();
+
+    // 2. GENERATE: Force sub-projects to create their individual version_data.rs
+    let _ = Command::new("cargo")
+        .args(["check", "-p", "alias_lib", "-p", "alias_win32", "-p", "alias_wrapper", "-p", "alias_hybrid"])
+        .status();
+
+    // 3. AGGREGATE: Now that the data exists, scrape it and overwrite the seed
+    main_overall_aggregate();
+
     main_vars();
     main_state();
 }
+
 fn main_vars() {
     let output = Command::new("git").args(["rev-parse", "--short", "HEAD"]).output().ok();
     let git_hash = output
@@ -109,3 +132,113 @@ pub fn raw_nuke_aliases() {
         );
     }
 }
+
+fn main_overall_aggregate() {
+    let root = std::env::var("CARGO_MANIFEST_DIR").unwrap();
+    // Corrected list based on your 'dir' output
+    let members = ["alias_lib", "alias_win32", "alias_wrapper", "alias"];
+    let dest_path = std::path::Path::new(&root).join("generated_overall.rs");
+
+    let mut total_minor = 0;
+    let mut total_patch = 0;
+    let mut total_churn = 0;
+    let mut timestamps = Vec::new();
+
+    println!("cargo:warning=--- Aggregator Trace ---");
+    println!("cargo:warning=Targeting: {}", dest_path.display());
+
+    for member in members {
+        if let Some(path) = find_member_version_file(member) {
+            println!("cargo:warning=[FOUND] {} -> {}", member, path.display());
+            if let Ok(content) = std::fs::read_to_string(&path) {
+                let m = scrape_val(&content, "minor");
+                let p = scrape_val(&content, "patch");
+                let c = scrape_val(&content, "compile");
+                total_minor += m;
+                total_patch += p;
+                total_churn += c;
+                if let Some(ts) = scrape_str(&content, "timestamp") {
+                    timestamps.push(ts);
+                }
+                println!("cargo:warning=      Data: minor={}, patch={}, churn={}", m, p, c);
+            }
+        } else {
+            println!("cargo:warning=[MISS]  Could not find version_data for {}", member);
+        }
+    }
+
+    let overall_code = format!(
+        r#"pub const SYSTEM_REALITY: Versioning = Versioning {{
+    lib: "WORKSPACE",
+    major: {},
+    minor: {},
+    patch: {},
+    compile: {},
+    timestamp: "{}",
+}};"#,
+        std::env::var("CARGO_PKG_VERSION_MAJOR").unwrap_or_else(|_| "0".into()),
+        total_minor, total_patch, total_churn,
+        timestamps.first().unwrap_or(&"unknown".to_string())
+    );
+
+    println!("cargo:warning=Writing WORKSPACE reality to file...");
+    std::fs::write(&dest_path, overall_code).unwrap();
+    println!("cargo:warning=--- Trace End ---");
+}
+
+fn seed_overall_if_needed() {
+    let root = std::env::var("CARGO_MANIFEST_DIR").unwrap();
+    let dest_path = std::path::Path::new(&root).join("generated_overall.rs");
+
+    // If file is missing OR size is 0 (from a touch), write the minimal valid structure
+    if !dest_path.exists() || std::fs::metadata(&dest_path).map(|m| m.len()).unwrap_or(0) == 0 {
+        let seed = r#"// Auto-generated Seed
+pub const SYSTEM_REALITY: Versioning = Versioning {
+    lib: "BOOTSTRAP", major: 0, minor: 0, patch: 0, compile: 0, timestamp: "initial"
+};"#;
+        std::fs::write(&dest_path, seed).unwrap();
+    }
+}
+
+fn find_member_version_file(member: &str) -> Option<std::path::PathBuf> {
+    // PROFILE is set by Cargo (debug vs release)
+    let profile = std::env::var("PROFILE").unwrap_or_else(|_| "debug".into());
+    let root = std::env::var("CARGO_MANIFEST_DIR").unwrap();
+    let build_dir = std::path::Path::new(&root).join("target").join(&profile).join("build");
+
+    if let Ok(entries) = std::fs::read_dir(&build_dir) {
+        for entry in entries.filter_map(|e| e.ok()) {
+            let name = entry.file_name().to_string_lossy().to_string();
+            // Cargo folders are member-hash (e.g., alias_lib-cc64ffd11038272e)
+            if name == member || name.starts_with(&format!("{}-", member)) {
+                let p = entry.path().join("out").join("version_data.rs");
+                if p.exists() {
+                    return Some(p);
+                }
+            }
+        }
+    }
+    None
+}
+
+fn scrape_val(content: &str, key: &str) -> u32 {
+    let pattern = format!("{}:", key);
+    content.lines()
+        .find(|l| l.contains(&pattern))
+        .and_then(|l| l.split(':').nth(1))
+        .and_then(|v| v.trim().trim_matches(',').parse().ok())
+        .unwrap_or(0)
+}
+
+fn scrape_str(content: &str, key: &str) -> Option<String> {
+    let pattern = format!("{}:", key);
+    content.lines()
+        .find(|l| l.contains(&pattern))
+        .and_then(|l| l.split('"').nth(1))
+        .map(|s| s.to_string())
+}
+
+
+
+
+
