@@ -1,3 +1,5 @@
+// versioning.rs
+
 use std::process::Command;
 use std::fs;
 use std::path::Path;
@@ -100,15 +102,15 @@ pub fn create_versioning() {
     let import = if pkg_name == "alias_lib" { "" } else { "use alias_lib::Versioning;" };
     let version_code = format!(
         r#"
-        {}
-        pub const VERSION: Versioning = Versioning {{
-            lib: "{}",
-            major: {},
-            minor: {},
-            patch: {},
-            compile: {},
-            timestamp: "{}",
-        }};"#,
+    {}
+    pub const VERSION: Versioning = Versioning {{
+        lib: "{}",
+        major: {},
+        minor: {},
+        patch: {},
+        compile: {},
+        timestamp: "{}",
+    }};"#,
         import, pkg_name, major, total_minor, total_patch, total_logic_churn, timestamp
     );
 

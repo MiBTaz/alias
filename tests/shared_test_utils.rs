@@ -10,7 +10,7 @@ use std::path::Path;
 use alias_lib::{AliasProvider, SetOptions, Verbosity, PurgeReport};
 #[allow(unused_imports)]
 use lazy_static::lazy_static;
-use alias_lib::ProviderType;
+use alias_lib::{ProviderType, Versioning};
 
 // 1. SHARED MOCK STATE
 lazy_static! {
@@ -125,6 +125,17 @@ impl AliasProvider for MockProvider {
         } else {
             ProviderType::NotLinked
         }
+    }
+    fn get_version() -> &'static Versioning {
+        static MOCK_VER: Versioning = Versioning {
+            lib: "Mock",
+            major: 0,
+            minor: 0,
+            patch: 0,
+            compile: 0,
+            timestamp: "1970-01-01",
+        };
+        &MOCK_VER
     }
 }
 

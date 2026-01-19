@@ -116,6 +116,9 @@ fn test_ui_audit_logic() {
 
 #[cfg(test)]
 mod win32_integration_tests {
+    use super::*;
+    use alias_lib::voice;
+    use serial_test::serial;
     use alias::HybridLibraryInterface;
 
     type P = HybridLibraryInterface; // Define P for the template

@@ -489,6 +489,17 @@ fn test_purge_stress_partial_failure() {
             Ok(report)
         }
 
+        fn get_version() -> &'static Versioning {
+            static MOCK_VER: Versioning = Versioning {
+                lib: "MaliciousMock",
+                major: 6,
+                minor: 6,
+                patch: 6,
+                compile: 666,
+                timestamp: "6666-06-06",
+            };
+            &MOCK_VER
+        }
     }
     // 2. Run the purge
     let report = MaliciousMock::purge_ram_macros(&v).unwrap();
