@@ -288,9 +288,8 @@ impl AliasProvider for Win32LibraryInterface {
         Ok(())
     }
     fn alias_show_all(verbosity: &Verbosity) -> Result<(), Box<dyn std::error::Error>> {
-        if verbosity.level < VerbosityLevel::Normal {
-            return Ok(());
-        }
+        if verbosity.level == VerbosityLevel::Mute { return Ok(()); }
+
         let os_pairs = Self::get_all_aliases(verbosity)?;
         perform_audit(os_pairs, verbosity, &Self::provider_type())
     }

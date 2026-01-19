@@ -116,9 +116,8 @@ impl AliasProvider for HybridLibraryInterface {
     }
 
     fn alias_show_all(verbosity: &Verbosity) -> Result<(), Box<dyn std::error::Error>> {
-        if verbosity.level < VerbosityLevel::Normal {
-            return Ok(());
-        }
+        if verbosity.level == VerbosityLevel::Mute { return Ok(()); }
+
         // 1. Try Win32
         let w32 = match Win32LibraryInterface::get_all_aliases(verbosity) {
             Ok(list) => list,

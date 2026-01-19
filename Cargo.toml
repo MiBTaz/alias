@@ -1,9 +1,4 @@
 # V:\Projects\alias\Cargo.toml
-[package-x]
-name = "alias-project"
-version = "0.10.0"
-edition = "2024"
-
 [workspace.package]
 authors = ["G. Anthony Davis"]
 version = "0.10.0"
@@ -18,6 +13,12 @@ members = [
     "alias_hybrid",
 ]
 resolver = "3"
+
+[profile.release]
+lto = true
+codegen-units = 1
+panic = 'abort'
+strip = true
 
 [workspace.dependencies]
 # --- Internal Project Paths (Defined ONCE here) ---

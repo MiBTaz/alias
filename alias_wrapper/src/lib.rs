@@ -235,9 +235,8 @@ impl alias_lib::AliasProvider for WrapperLibraryInterface {
     }
 
     fn alias_show_all(verbosity: &Verbosity) -> Result<(), Box<dyn std::error::Error>> {
-        if verbosity.level < VerbosityLevel::Normal {
-            return Ok(());
-        }
+        if verbosity.level == VerbosityLevel::Mute { return Ok(()); }
+
         // FIX: Extract the Vec from the Result using '?'
         let os_aliases = Self::get_all_aliases(verbosity)?;
 

@@ -19,18 +19,22 @@ use function_name::named;
 
 #[path = "../../versioning.rs"]
 pub mod versioning;
-pub use versioning::{Versioning};
-// keep this BELOW Versioning or boom!
+pub use versioning::Versioning;
+
+// 1. THE ONLY GLOBAL INCLUDE
+// Points to the file created by alias_lib/build.rs in the same folder
+include!("generated_overall.rs");
+
+// 2. THE LOCAL BUILD INCLUDE (Churn/Hash for alias_lib only)
 include!(concat!(env!("OUT_DIR"), "/version_data.rs"));
-// This pulls in the aggregate calculated by the root build.rs
 impl Versioning {
     pub fn current() -> &'static Self {
         &VERSION
     }
 }
 impl Versioning {
-    pub fn display_versions(verbosity: &Verbosity, versions: &[&'static Self]) {
-        Self::display_short_version(verbosity, true, versions);
+    pub fn display_versions(verbosity: &Verbosity, full_version: &'static Self, versions: &[&'static Self]) {
+        Self::display_short_version(verbosity, true, full_version, versions);
         let separator = "-".repeat(65);
         scream!(verbosity, AliasIcon::None, "{}", &separator);
         scream!(verbosity, AliasIcon::None, "{:<16} | {:<10} | {:<8} | {:<15}", "Component", "Version", "Build", "Timestamp");
@@ -49,15 +53,18 @@ impl Versioning {
         }
         scream!(verbosity, AliasIcon::None, "{}", separator);
     }
-    pub fn display_short_version(verbosity: &Verbosity, stderr: bool, versions: &[&'static Self]) {
+    pub fn display_short_version(verbosity: &Verbosity, stderr: bool,  full_version: &'static Self, versions: &[&'static Self]) {
         if versions.is_empty() { return; }
 
         let exe_name = get_alias_exe_nofail(verbosity);
         let core = versions[0];
         let host = versions[versions.len() - 1];
-        let version = format!("{} v{}.{}.{} ({} v{}.{}.{} build {})",
-                              exe_name, core.major, core.minor, core.patch,
-                              host.lib, host.major, host.minor, host.patch, host.compile);
+        let version = format!("{} v{}.{}.{} ({} {}.{}.{}/{}.{}.{} build {})",
+                              exe_name, full_version.major, full_version.minor, full_version.patch,
+                              host.lib,
+                              host.major, host.minor, host.patch,
+                              core.major, core.minor, core.patch,
+                              host.compile);
 
 
         // alias_lib v0.5.2 (alias v0.0.4 build 339)
@@ -66,12 +73,6 @@ impl Versioning {
         } else {
             scream!(verbosity, AliasIcon::Question, "{}", version);
         }
-    }
-}
-include!("../../generated_overall.rs");
-impl Versioning {
-    pub const fn system_reality() -> &'static Self {
-        &SYSTEM_REALITY
     }
 }
 
@@ -1298,6 +1299,9 @@ pub trait AliasProvider {
             Self::get_version(),
         ]
     }
+    fn get_full_version() -> &'static Versioning {
+        &SYSTEM_REALITY
+    }
 }
 
 // --- Functions ---
@@ -1305,6 +1309,7 @@ pub trait AliasProvider {
 // Phase A: Calls parse_arguments to build the TaskQueue.
 // Phase B (The Executor Loop): Iterates over every Task in the queue and passes it to dispatch.
 // Special Case: Handles --setup separately before the loop
+
 pub fn run<P: AliasProvider>(mut args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
     // 1. ENV Injection (unchanged)
     if let Ok(opts) = env::var(ENV_ALIAS_OPTS) {
@@ -1319,6 +1324,14 @@ pub fn run<P: AliasProvider>(mut args: Vec<String>) -> Result<(), Box<dyn std::e
     // 2. Parse intent
     // This now returns a queue where tasks have their own .path (some valid, some raw/Fail)
     let (mut queue, verbosity) = parse_arguments(&args);
+
+    // check the failure state first.
+    if queue.tasks.iter().any(|t| matches!(t.action, AliasAction::Fail)) {
+        scream!(verbosity, AliasIcon::Alert, "Execution aborted: Command line contains unrecoverable errors.");
+        // Return a proper Err to main
+        return Err("Alias execution failed due to invalid state".into());
+    }
+
     // Check if the very first intent is Setup
     if let Some(first_task) = queue.tasks.first() {
         if first_task.action == AliasAction::Setup {
@@ -1846,12 +1859,14 @@ pub fn dispatch<P: AliasProvider>(task: Task, verbosity: &Verbosity, ) -> Result
             }
         }
         AliasAction::Version => {
+            let full_version = P::get_full_version();
             let library_versions = P::get_versions();
-            Versioning::display_versions(verbosity, &library_versions);
+            Versioning::display_versions(verbosity, &full_version, &library_versions);
         }
         AliasAction::VersionShort => {
+            let full_version = P::get_full_version();
             let library_versions = P::get_versions();
-            Versioning::display_short_version(verbosity, false, &library_versions);
+            Versioning::display_short_version(verbosity, false, &full_version, &library_versions);
         }
         AliasAction::Which => {
             P::alias_show_all(verbosity)?;
