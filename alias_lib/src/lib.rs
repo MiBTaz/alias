@@ -1,5 +1,6 @@
 // alias_lib/src/lib.rs
 
+
 // --- Includes ---
 use std::{env, fmt};
 use std::fs;
@@ -218,12 +219,28 @@ pub struct Versioning {
     pub compile: u32,
     pub timestamp: &'static str,
 }
+// keep this BELOW Versioning or boom!
+include!(concat!(env!("OUT_DIR"), "/version_data.rs"));
 impl Versioning {
     pub fn current() -> &'static Self {
         &VERSION
     }
 }
-include!(concat!(env!("OUT_DIR"), "/version_data.rs"));
+impl Versioning {
+    pub fn display_versions(versions: impl IntoIterator<Item = &'static Self>) {
+        println!("{:-<65}", "");
+        println!("{:<16} | {:<10} | {:<8} | {:<15}", "Component", "Version", "Build", "Timestamp");
+        println!("{:-<65}", "");
+
+        for v in versions {
+            println!(
+                "{:<16} | v{}.{}.{:<2} | {:<8} | {:<15}",
+                v.lib, v.major, v.minor, v.patch, v.compile, v.timestamp
+            );
+        }
+        println!("{:-<65}", "");
+    }
+}
 
 #[derive(Debug)]
 pub struct AliasError {
@@ -540,23 +557,37 @@ impl Verbosity {
     pub fn whisper(&self, msg: &str) {
         // Keep your level check, just add the "Empty String" skip
         if msg.is_empty() || self.level < VerbosityLevel::Silent { return }
-        if !self.emitln(msg) { println!("{}", msg); }
+        if msg.trim().is_empty() {
+            if !self.emit("") { println!(); }
+        } else {
+            if !self.emitln(msg) { println!("{}", msg); }
+        }
     }
 
     pub fn say(&self, msg: &str) {
         if msg.is_empty() || self.level < VerbosityLevel::Normal { return }
-        if !self.emitln(msg) { println!("{}", msg); }
+        if msg.trim().is_empty() {
+            if !self.emit("") { println!(); }
+        } else {
+            if !self.emitln(msg) { println!("{}", msg); }
+        }
     }
 
     pub fn shout(&self, msg: &str) {
         if msg.is_empty() || self.level <= VerbosityLevel::Mute { return }
-        if !self.emitln(msg) { println!("{}", msg); }
+        if msg.trim().is_empty() {
+            if !self.emit("") { println!(); }
+        } else {
+            if !self.emitln(msg) { println!("{}", msg); }
+        }
     }
 
     pub fn scream(&self, msg: &str) {
-        if msg.is_empty() { return } // Even a scream needs words!
-        self.emitln(msg);
-        eprintln!("{}", msg);
+        if msg.trim().is_empty() {
+            if !self.emit("") { eprintln!(); }
+        } else {
+            if !self.emitln(msg) { eprintln!("{}", msg); }
+        }
     }
 
     fn property(&self, label: &str, value: &str, width: usize, wdf: (bool, bool, bool)) {
@@ -581,26 +612,6 @@ impl Verbosity {
         let msg = format!("{}{}", line, audit_block);
         if !self.emitln(&msg) { println!("{}", msg); }
     }
-/*
-    fn align(&self, name: &str, value: &str, width: usize, wdf: (bool, bool, bool)) {
-        if self.level == VerbosityLevel::Mute { return; }
-
-        let display_val = if value.is_empty() { "<EMPTY>" } else { value };
-        let line = format!("{}={}", name, display_val);
-        let (w, d, f) = wdf;
-
-        // --- THE FIX ---
-        // Emojis (show_icons) occupy 2 terminal columns.
-        // ASCII letters/spaces occupy 1.
-        let spacer = if self.show_icons.is_on() { "  " } else { " " };
-
-        let w_m = if w { self.get_icon_str(AliasIcon::Win32) } else { spacer };
-        let d_m = if d { self.get_icon_str(AliasIcon::Doskey) } else { spacer };
-        let f_m = if f { self.get_icon_str(AliasIcon::File)   } else { spacer };
-
-        print!("{:width$} [{}{}{}]", line, w_m, d_m, f_m, width = width);
-    }
-*/
     fn align(&self, name: &str, value: &str, width: usize, wdf: (bool, bool, bool), provider: &ProviderType) {
         if self.level == VerbosityLevel::Mute { return; }
 
@@ -781,6 +792,7 @@ pub enum AliasAction {
     NoQuiet,
     Remove(SetOptions),
     Unalias(SetOptions),
+    Version,
     Which,
     Toggle(Box<AliasAction>, bool),
 }
@@ -794,14 +806,16 @@ impl AliasAction {
             AliasAction::Help              => "--help".to_string(),
             AliasAction::Reload            => "--reload".to_string(),
             AliasAction::Setup             => "--setup".to_string(),
-            AliasAction::Which             => "--which".to_string(),
+            AliasAction::ShowAll           => "--show-all".to_string(),
             AliasAction::Startup           => "--startup".to_string(),
             AliasAction::Temp              => "--temp".to_string(),
-            AliasAction::NoTemp              => "--no-temp".to_string(),
+            AliasAction::NoTemp            => "--no-temp".to_string(),
+            AliasAction::Version           => "--version".to_string(),
+            AliasAction::Which             => "--which".to_string(),
 
             // --- The Symmetric Toggles ---
-            AliasAction::Case             => "--case".to_string(),
-            AliasAction::NoCase           => "--no-case".to_string(),
+            AliasAction::Case              => "--case".to_string(),
+            AliasAction::NoCase            => "--no-case".to_string(),
             AliasAction::Quiet             => "--quiet".to_string(),
             AliasAction::NoQuiet           => "--no-quiet".to_string(),
             AliasAction::Icons             => "--icons".to_string(),
@@ -826,7 +840,6 @@ impl AliasAction {
                 s
             }
             // --- Internal/UI Only (Return empty or specific marker) ---
-            AliasAction::ShowAll           => "".to_string(),
             AliasAction::Invalid           => "".to_string(),
             AliasAction::Fail              => "".to_string(),
             AliasAction::Toggle(from, to)  => format!("__internal_toggle={}:{}", from, to),
@@ -842,6 +855,7 @@ impl AliasAction {
             | AliasAction::Set(_)
             | AliasAction::ShowAll
             | AliasAction::Which
+            | AliasAction::Startup
             => true,
             // Everything else (Help, Setup, Which, etc.) doesn't touch the d
             _ => false,
@@ -939,7 +953,7 @@ impl FromStr for AliasAction {
             "--clear"                   => Ok(if is_negated { Self::Invalid } else { Self::Clear }),
             "--which"                   => Ok(if is_negated { Self::Invalid } else { Self::Which }),
             "--edalias" | "--edaliases" => Ok(if is_negated { Self::Invalid } else { Self::Edit(None) }),
-            "--showall" | "--all"       => Ok(if is_negated { Self::Invalid } else { Self::ShowAll }),
+            "--show-all"                => Ok(if is_negated { Self::Invalid } else { Self::ShowAll }),
             "--file"                    => Ok(if is_negated { Self::Invalid } else { Self::File }),
 
             _ if first_token.starts_with("--")  => Ok(Self::Invalid),
@@ -963,22 +977,23 @@ impl fmt::Display for AliasAction {
             Self::Quiet                 => write!(f, "--quiet"),
             Self::NoQuiet               => write!(f, "--no-quiet"),
             Self::Reload                => write!(f, "--reload"),
-            AliasAction::Remove(opts) => {
+            Self::Remove(opts) => {
                 if opts.name.is_empty() { write!(f, "--remove") }
                 else { write!(f, "--remove {}", opts.name) }
             },
             Self::Set(opt)  => write!(f, "{}={}", opt.name, opt.value),
             Self::Setup                 => write!(f, "--setup"),
-            Self::ShowAll               => write!(f, "--all"),
+            Self::ShowAll               => write!(f, "--show-all"),
             Self::Startup               => write!(f, "--startup"),
             Self::Temp                  => write!(f, "--temp"),
             Self::NoTemp                => write!(f, "--no-temp"),
             Self::Tips                  => write!(f, "--tips"),
             Self::NoTips                => write!(f, "--no-tips"),
-            AliasAction::Unalias(opts) => {
+            Self::Unalias(opts) => {
                 if opts.name.is_empty() { write!(f, "--unalias") }
                 else { write!(f, "--unalias {}", opts.name) }
             },
+            Self::Version               => write!(f, "--version"),
             Self::Which                 => write!(f, "--which"),
             // options the actually have ro CLI
             Self::Fail                  => write!(f, "--fail"),
@@ -995,6 +1010,8 @@ impl<'a> std::fmt::Display for AliasErrorString<'a> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         // You must match on self.0 because self is the wrapper struct
         match self.0 {
+            AliasAction::Case => write!(f, "Error setting/using force case"),
+            AliasAction::NoCase => write!(f, "Error unsetting/disabling force case"),
             AliasAction::Clear => write!(f, "Clear aliases error"),
             AliasAction::Edit(path) => match path {
                 Some(exe) => write!(f, "Error editing alias file with: {}", exe),
@@ -1002,8 +1019,6 @@ impl<'a> std::fmt::Display for AliasErrorString<'a> {
             },
             AliasAction::Fail => write!(f, "General Error"),
             AliasAction::File => write!(f, "Error loading file for actions or load"),
-            AliasAction::Case => write!(f, "Error setting/using force case"),
-            AliasAction::NoCase => write!(f, "Error unsetting/disabling force case"),
             AliasAction::Help => write!(f, "Display help"),
             AliasAction::Invalid => write!(f, "Unrecognized or malformed command"),
             AliasAction::Icons => write!(f, "Error setting icons"),
@@ -1014,13 +1029,14 @@ impl<'a> std::fmt::Display for AliasErrorString<'a> {
             AliasAction::Set(opts) => write!(f, "Error setting alias: {}", opts.name),
             AliasAction::Setup => write!(f, "Error setting up autorun registry entry"),
             AliasAction::ShowAll => write!(f, "Error showing all aliases"),
+            AliasAction::Startup => write!(f, "Error setting/using statup mode"),
             AliasAction::Tips => write!(f, "Error setting tips"),
             AliasAction::NoTips => write!(f, "Error unsetting tips"),
-            AliasAction::Unalias(opts) => write!(f, "Error unaliasing alias: {}", opts.name),
-            AliasAction::Which => write!(f, "Error running diagnostics"),
-            AliasAction::Startup => write!(f, "Error setting/using statup mode"),
             AliasAction::Temp => write!(f, "Error setting/using process as memory only"),
             AliasAction::NoTemp => write!(f, "Error setting/using process as dual (mem/disk))"),
+            AliasAction::Unalias(opts) => write!(f, "Error unaliasing alias: {}", opts.name),
+            AliasAction::Version => write!(f, "Error getting versions"),
+            AliasAction::Which => write!(f, "Error running diagnostics"),
             AliasAction::Quiet => write!(f, "Error setting/using quiet mode"),
             AliasAction::NoQuiet => write!(f, "Error unsetting/disabling quiet mode"),
             AliasAction::Toggle(from, to) => write!(f, "Error reverse mapping {} to {}", from, to),
@@ -1245,6 +1261,11 @@ pub trait AliasProvider {
     }
     fn is_api_responsive(_timeout: Duration) -> bool { true }
     fn get_version() -> &'static Versioning;
+    fn get_versions() -> Vec<&'static Versioning> {
+        vec![
+            Self::get_version(),
+        ]
+    }
 }
 
 // --- Functions ---
@@ -1296,8 +1317,11 @@ pub fn run<P: AliasProvider>(mut args: Vec<String>) -> Result<(), Box<dyn std::e
     // 4. THE STARTUP HYDRATION
     if verbosity.in_startup {
         // Startup always uses the default anchor
-        dispatch::<P>(Task {action: AliasAction::Reload, path: default_path.clone()} , &verbosity)?;
-        if queue.is_empty() { return Ok(()); }
+        for task in &mut queue.tasks {
+            if task.action == AliasAction::Startup {
+                task.action = AliasAction::Reload;
+            }
+        }
     }
 
     // 5. THE FALLBACK
@@ -1401,7 +1425,7 @@ pub fn parse_arguments(args: &[String]) -> (TaskQueue, Verbosity) {
             AliasAction::Tips => { voice.show_icons = ShowFeature::On; continue; },
             AliasAction::NoTips  => { voice.show_tips = ShowTips::Off; continue; },
             AliasAction::Quiet => { voice.level = VerbosityLevel::Silent; voice.show_icons = ShowFeature::Off; continue; },
-            AliasAction::NoQuiet => { voice.level = VerbosityLevel::default(); continue; },
+            AliasAction::NoQuiet => { voice.level = VerbosityLevel::Normal; voice.show_icons = ShowFeature::On; continue; },
             AliasAction::Temp => { volatile = true; continue; },
             AliasAction::NoTemp => { volatile = false; continue; },
             AliasAction::Case => { force_case = true; continue; },
@@ -1410,6 +1434,7 @@ pub fn parse_arguments(args: &[String]) -> (TaskQueue, Verbosity) {
                 if voice.in_setup { setup_failure!(voice, queue, arg); }
                 voice = voice!(Mute, Off, Off);
                 voice.in_startup = true;
+                queue.push(AliasAction::Startup);
                 continue;
             }
             // the inline explicit alias setter.
@@ -1492,7 +1517,8 @@ pub fn parse_arguments(args: &[String]) -> (TaskQueue, Verbosity) {
             // Task-generating Intents
             AliasAction::Reload => { queue.push(AliasAction::Reload); pivot_index = i + 1; continue;},
             AliasAction::Which => { queue.push(AliasAction::Which); pivot_index = i + 1; continue;},
-            AliasAction::Clear => { queue.push(AliasAction::Clear); continue;},
+            AliasAction::Clear => { queue.push(AliasAction::Clear); pivot_index = i + 1; continue;},
+            AliasAction::ShowAll => { queue.push(AliasAction::ShowAll); pivot_index = i + 1; continue;},
             // Use the data captured by intent() for parameterized flags
             AliasAction::Edit(val) => {
                 if voice.in_setup { setup_failure!(voice, queue, arg); }
@@ -1752,11 +1778,6 @@ pub fn dispatch<P: AliasProvider>(task: Task, verbosity: &Verbosity, ) -> Result
             P::set_alias(opts, path, verbosity)?;
         }
         AliasAction::ShowAll => P::alias_show_all(verbosity)?,
-        AliasAction::Which => {
-            P::alias_show_all(verbosity)?;
-            say!(verbosity, AliasIcon::None, "\n");
-            P::run_diagnostics(path, verbosity)?;
-        },
         AliasAction::Unalias(mut opts) => {
             if !opts.name.is_empty() {
                 #[cfg(debug_assertions)]
@@ -1775,7 +1796,15 @@ pub fn dispatch<P: AliasProvider>(task: Task, verbosity: &Verbosity, ) -> Result
                 return Err(failure!(verbosity, ErrorCode::MissingName, "Error:Alias name ia required"));
             }
         }
-
+        AliasAction::Version => {
+            let library_versions = P::get_versions();
+            Versioning::display_versions(library_versions);
+        }
+        AliasAction::Which => {
+            P::alias_show_all(verbosity)?;
+            say!(verbosity, AliasIcon::None, "\n");
+            P::run_diagnostics(path, verbosity)?;
+        },
         // errors and mismatches
         AliasAction::Invalid => {
             scream!(verbosity, AliasIcon::Alert, "Invalid command state.\nDid you use an alias flag in an implicit alias? try quoting the RHS or using --");

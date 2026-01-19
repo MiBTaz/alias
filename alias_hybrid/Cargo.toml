@@ -1,7 +1,7 @@
 # alias_hybrid/Cargo.toml
 [package]
 name = "alias"
-version = "0.9.0"
+version = "0.0.4"
 edition = "2024"
 
 [dependencies]

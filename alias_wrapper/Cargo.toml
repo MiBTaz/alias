@@ -1,7 +1,7 @@
 # alias_wrapper/Cargo.toml
 [package]
 name = "alias_wrapper"
-version = "0.5.1"
+version = "0.2.3"
 edition = "2024"
 
 [dependencies]

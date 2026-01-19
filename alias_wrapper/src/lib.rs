@@ -18,19 +18,19 @@ pub struct WrapperLibraryInterface;
 // ... (imports remain the same)
 
 impl alias_lib::AliasProvider for WrapperLibraryInterface {
-/*
-    // SYNCED: No more trimming. Let the command pass through raw.
-    fn raw_set_macro(name: &str, value: Option<&str>) -> io::Result<bool> {
-        let val = value.unwrap_or("");
-        // Remove the .trim_matches('"') calls to match Win32's "Raw" philosophy
-        let status = Command::new("doskey")
-            .args(["/exename=cmd.exe", &format!("{}={}", name.trim(), val.trim())])
-            .status()
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+    /*
+        // SYNCED: No more trimming. Let the command pass through raw.
+        fn raw_set_macro(name: &str, value: Option<&str>) -> io::Result<bool> {
+            let val = value.unwrap_or("");
+            // Remove the .trim_matches('"') calls to match Win32's "Raw" philosophy
+            let status = Command::new("doskey")
+                .args(["/exename=cmd.exe", &format!("{}={}", name.trim(), val.trim())])
+                .status()
+                .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
 
-        Ok(status.success())
-    }
-*/
+            Ok(status.success())
+        }
+    */
     // SYNCED: Use the same Highlander deduplication logic
     fn write_autorun_registry(cmd: &str, verbosity: &Verbosity) -> io::Result<()> {
         let hkcu = winreg::RegKey::predef(winreg::enums::HKEY_CURRENT_USER);
@@ -153,7 +153,7 @@ impl alias_lib::AliasProvider for WrapperLibraryInterface {
         }
         vec![]
     }
-// old
+    // old
     fn raw_set_macro(name: &str, value: Option<&str>) -> io::Result<bool> {
         let val = value.unwrap_or("");
         let clean_name = name.trim_matches('"');
@@ -235,19 +235,28 @@ impl alias_lib::AliasProvider for WrapperLibraryInterface {
     }
 
     fn alias_show_all(verbosity: &Verbosity) -> Result<(), Box<dyn std::error::Error>> {
+        if verbosity.level < VerbosityLevel::Normal {
+            return Ok(());
+        }
         // FIX: Extract the Vec from the Result using '?'
         let os_aliases = Self::get_all_aliases(verbosity)?;
 
         // Perform the audit and percolate any error immediately
         alias_lib::perform_audit(os_aliases, verbosity, &Self::provider_type())
     }
-    fn provider_type() -> ProviderType { ProviderType::Wrapper  }
+    fn provider_type() -> ProviderType { ProviderType::Wrapper }
     fn is_api_responsive(_timeout: Duration) -> bool {
         true
     }
 
     fn get_version() -> &'static Versioning {
         &VERSION
+    }
+    fn get_versions() -> Vec<&'static Versioning> {
+        vec![
+            alias_lib::Versioning::current(),
+            Self::get_version(),
+        ]
     }
 }
 
@@ -261,4 +270,5 @@ fn check_registry_wrapper() -> RegistryStatus {
         RegistryStatus::Mismatch("Found other AutoRun commands".into())
     }
 }
+
 

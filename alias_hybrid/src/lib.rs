@@ -118,6 +118,9 @@ impl AliasProvider for HybridLibraryInterface {
     }
 
     fn alias_show_all(verbosity: &Verbosity) -> Result<(), Box<dyn std::error::Error>> {
+        if verbosity.level < VerbosityLevel::Normal {
+            return Ok(());
+        }
         // 1. Try Win32
         let w32 = match Win32LibraryInterface::get_all_aliases(verbosity) {
             Ok(list) => list,
@@ -165,5 +168,13 @@ impl AliasProvider for HybridLibraryInterface {
     }
     fn get_version() -> &'static Versioning {
         &VERSION
+    }
+    fn get_versions() -> Vec<&'static Versioning> {
+        vec![
+            alias_lib::Versioning::current(),
+            WrapperLibraryInterface::get_version(),
+            Win32LibraryInterface::get_version(),
+            Self::get_version(),
+        ]
     }
 }

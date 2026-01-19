@@ -1,7 +1,7 @@
 # alias_win32/Cargo.toml
 [package]
 name = "alias_win32"
-version = "0.7.2"
+version = "0.3.3"
 edition = "2024"
 
 [dependencies]

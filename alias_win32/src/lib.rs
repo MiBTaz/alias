@@ -288,6 +288,9 @@ impl AliasProvider for Win32LibraryInterface {
         Ok(())
     }
     fn alias_show_all(verbosity: &Verbosity) -> Result<(), Box<dyn std::error::Error>> {
+        if verbosity.level < VerbosityLevel::Normal {
+            return Ok(());
+        }
         let os_pairs = Self::get_all_aliases(verbosity)?;
         perform_audit(os_pairs, verbosity, &Self::provider_type())
     }
@@ -301,10 +304,16 @@ impl AliasProvider for Win32LibraryInterface {
             true // If it didn't hang, it's responsive
         }).unwrap_or(false)
     }
-
     fn get_version() -> &'static Versioning {
         &VERSION
     }
+    fn get_versions() -> Vec<&'static Versioning> {
+        vec![
+            alias_lib::Versioning::current(),
+            Self::get_version(),
+        ]
+    }
+
 }
 
 // --- Internal Utilities (Non-Trait) ---

@@ -12,6 +12,10 @@ use alias_lib::ShowFeature;
 
 #[path = "../../tests/state_restoration.rs"]
 mod stateful;
+
+#[path = "../../tests/shared_test_utils.rs"]
+mod shared_hybrid;
+
 #[cfg(test)]
 #[ctor::ctor]
 fn win32_local_tests_init() {
@@ -25,7 +29,7 @@ fn win32_local_tests_init() {
     }
     let _ = stateful::has_backup();
     stateful::pre_flight_inc();
-    global_test_setup();
+    shared_hybrid::global_test_setup();
 }
 #[cfg(test)]
 #[ctor::dtor]
@@ -110,6 +114,11 @@ fn test_ui_audit_logic() {
     }
 }
 
-type P = HybridLibraryInterface; // Define P for the template
+#[cfg(test)]
+mod win32_integration_tests {
+    use alias::HybridLibraryInterface;
 
-include!("../../tests/cli_tests_win32.rs");
+    type P = HybridLibraryInterface; // Define P for the template
+
+    include!("../../tests/cli_tests_win32.rs");
+}
