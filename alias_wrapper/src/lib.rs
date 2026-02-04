@@ -1,4 +1,5 @@
 // alias_wrapper/src/lib.rs
+// Licensed under PolyForm Noncommercial 1.0.0 via alias_lib.
 
 use std::{env, io};
 use std::error::Error;

@@ -1,21 +1,7 @@
 // alias_lib/src/lib.rs
-
-// --- Includes ---
-use std::{env, fmt};
-use std::fs;
-use std::io;
-use std::io::{Read, Seek, SeekFrom, Write};
-use std::path::{Path, PathBuf};
-use std::process::Command;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use std::collections::HashMap;
-use std::fs::File;
-use std::ops::Not;
-use std::sync::{Arc, Mutex};
-use std::str::FromStr;
-#[allow(unused_imports)]
-#[cfg(debug_assertions)]
-use function_name::named;
+// License: PolyForm Noncommercial 1.0.0 (Personal & Research Use Only)
+// Commercial use is strictly prohibited without a separate agreement.
+// Redistribution is permitted provided this notice and license remain intact.
 
 #[path = "../../versioning.rs"]
 pub mod versioning;
@@ -248,10 +234,15 @@ pub const UNC_GLOBAL_PATH: &str = r"\\?\UNC\";
 pub const UNC_PATH: &str = r"\\?\";
 pub const REG_SUBKEY: &str = r"Software\Microsoft\Command Processor";
 pub const REG_AUTORUN_KEY: &str = "AutoRun";
+pub const APPDATA_PATH: &str = "APPDATA";
+pub const USERPROFILE_PATH: &str = "USERPROFILE";
 pub const ENV_ALIAS_FILE: &str = "ALIAS_FILE";
 pub const ENV_ALIAS_OPTS: &str = "ALIAS_OPTS";
 const ENV_EDITOR: &str = "EDITOR";
 const ENV_VISUAL: &str = "VISUAL";
+const ENV_PATHEXT: &str = "PATHEXT";
+const ENV_PATH: &str = "PATH";
+
 pub const DEFAULT_ALIAS_FILENAME: &str = "aliases.doskey";
 const DEFAULT_APPDATA_ALIAS_DIR: &str = "alias_tool";
 const FALLBACK_EDITOR: &str = "notepad";
@@ -1253,7 +1244,7 @@ pub trait AliasProvider {
             startup_command.push_str(payload);
         }
         // Priority 2: No payload, check environment
-        else if std::env::var("ALIAS_FILE").is_ok() {
+        else if std::env::var(ENV_ALIAS_FILE).is_ok() {
             // Environment exists, so "alias --startup" is enough
         }
         // Priority 3: No payload, no environment -> Prompt (The "Snafu" Safety Net)
@@ -1986,20 +1977,67 @@ USAGE:
     }
     shout!(verbosity, AliasIcon::None, r#"
 FLAGS:
-  --[no-]case             Enable/Disable case-sensitive matching for this alias
-  --edalias[=EDITOR]      Open alias file in editor
-  --file <path>           Specify a custom .doskey file path
-  --help                  Show this help menu
-  --[no-]quiet            Suppress/Restore success output & icons
-  --reload                Force reload from file into memory
-  --remove                Remove a specific alias from the file and memory
-  --setup                 Install AutoRun registry hook
-  --[no-]temp             Set alias in RAM only (volatile)
-  --[no-]tips             Enable/Disable helpful tips
-  --unalias               Remove a specific alias from memory only
-  --which                 Run diagnostics & Audit
-  --                      Stop processing flags (treat rest as name/value)
-  "#);
+--help                  Show this help menu
+
+ENVIRONMENT VARIABLES:
+ALIAS_FILE              Default alias file name ({alias_file})
+ALIAS_OPTS              Override options
+VISUAL                  Primary editor for edalias
+EDITOR                  Secondary editor for edalias
+PATHEXT                 CMD extensions list
+PATH                    CMD PATH
+USERPROFILE             Windows user profile directory
+APPDATA                 Windows application data directory (under userprofile)
+
+PATHEXT is used to help detirmine if a 'short name` given for the editor is valid
+PATH is used to find the editor
+USERPROFILE and APPDATA are fallback paths for the aliases file, in case CWD is locked
+if neither VISUAL or EDITOR is set, final fallback is notepad.
+
+MACRO STATE:
+Defaults are --no-temp, --no-case
+  --temp / --no-temp    Force Volatility (RAM only) vs. Persistence
+  --case / --no-case    Force Case-Sensitivity vs. Case-Insensitive
+  --file <path>         Redirect action to a specific alias file
+
+SYMMETRIC TOGGLES:
+Defaults are --no-quiet --icons --tips (at 10%)
+  --quiet / --no-quiet  Metadata/Whisper suppression
+  --icons / --no-icons  ANSI glyphs/icons in output
+  --tips  / --no-tips   Random usage hint injection
+
+PRIMARY ACTIONS:
+  <name>                Query/Lookup a specific alias definition
+  --remove <name>       Delete alias from file and RAM (see --temp and --file)
+  --unalias <name>      Drop alias from current session (RAM)
+  --show-all            List hydrated mapping (File + RAM)
+  --which               Deep-audit sync status across all backends
+  --edalias=[=EDITOR]   Open active file in editor (Path to editor optional)
+  --reload              Force re-sync of Win32 environment strings
+  --                    Stop processing flags (treat rest as name/value)
+
+SYSTEM & BOOT:
+  --setup               Initialize Windows Registry AutoRun hooks
+  --startup             Execute boot-time hydration (via AutoRun)
+  --clear               Nuke all aliases in the active context
+  --version / --ver     Full build metadata vs. Short string
+
+  EXAMPLES:
+  {exe_name} pull=git pull --rebase
+  {exe_name} --file G:\tools.alias --show-all
+  {exe_name} --temp t=cd /d %TEMP%
+  {exe_name} --edalias=notepad
+
+  NOTES:
+  Default alias filename is {alias_file}
+  Edalias overlays the file with in place macros. to clear type {exe_name} --reload --edalias
+  Options are queued, so order is preserved. --reload --file=x is not the same as --file=x --relaod
+  Specific macro names that match dos/win special files are ignores (e.g. PRN,NUL,AUX,CON etc.)
+  --file overlays the in-memory configuration. --file=x --file=y overlays both
+  For multi quoted aliases, cmd has a tendancy to be very britle. Using --edalias is usually better
+  Don't want to ever fallback to doskey? Use alias_win32. Never want to hit the api? Use alias_wrapper.
+
+  "#, exe_name = exe_name, alias_file = ENV_ALIAS_FILE);
 
     // 3. Environment (Keep these separate to use the Constants)
     let eaf = std::env::var(ENV_ALIAS_FILE).unwrap_or_else(|_| "".to_string());
@@ -2344,7 +2382,7 @@ pub fn get_alias_path(current_file: &str) -> Option<PathBuf> {
     }
 
     // 3. Priority Three: Standard OS Locations (The Search)
-    ["APPDATA", "USERPROFILE"].iter()
+    [APPDATA_PATH, USERPROFILE_PATH].iter()
         .filter_map(|var| env::var(var).ok().map(PathBuf::from))
         .map(|base| base.join(DEFAULT_APPDATA_ALIAS_DIR).join(DEFAULT_ALIAS_FILENAME))
         .find(|p| {
@@ -2412,11 +2450,11 @@ pub fn find_executable(name: &str) -> Option<PathBuf> {
     }
 
     // 2. Fetch PATHEXT and PATH
-    let pathext_raw = env::var("PATHEXT").unwrap_or_else(|_| DEFAULT_EXTS.to_string());
+    let pathext_raw = env::var(ENV_PATHEXT).unwrap_or_else(|_| DEFAULT_EXTS.to_string());
     let extensions: Vec<&str> = pathext_raw.split(';').collect();
 
     // 3. The Search Gauntlet (The missing logic)
-    if let Ok(path_var) = env::var("PATH") {
+    if let Ok(path_var) = env::var(ENV_PATH) {
         for mut path_node in env::split_paths(&path_var) {
             path_node.push(name);
 
@@ -2650,7 +2688,7 @@ pub fn is_script_extension(ext: &str) -> bool {
     let e_lower = ext.to_lowercase();
 
     // 1. Get the system list (which usually includes .EXE)
-    let pathext = std::env::var("PATHEXT")
+    let pathext = std::env::var(ENV_PATHEXT)
         .unwrap_or_else(|_| DEFAULT_EXTS.to_string())
         .to_lowercase();
 

@@ -1,7 +1,7 @@
 # alias_hybrid/Cargo.toml
 [package]
 name = "alias"
-version = "0.0.4"
+version = "0.0.5"
 edition = "2024"
 
 [dependencies]
@@ -30,3 +30,4 @@ identity_hybrid = []
 
 [lints.rust]
 unexpected_cfgs = { level = "allow", check-cfg = ['cfg(feature, values("identity_win32", "identity_wrapper", "identity_hybrid", "test_utils"))'] }
+

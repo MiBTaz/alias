@@ -1,7 +1,7 @@
 # V:\Projects\alias\Cargo.toml
 [workspace.package]
 authors = ["G. Anthony Davis"]
-version = "0.10.0"
+version = "0.11.15"
 edition = "2024"
 
 [workspace]

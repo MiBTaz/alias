@@ -1,4 +1,5 @@
 // alias_hybrid/src/lib.rs
+// Licensed under PolyForm Noncommercial 1.0.0 via alias_lib.
 
 use std::io;
 use std::path::Path;

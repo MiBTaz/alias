@@ -1,7 +1,7 @@
 # alias_wrapper/Cargo.toml
 [package]
 name = "alias_wrapper"
-version = "0.2.3"
+version = "0.2.4"
 edition = "2024"
 
 [dependencies]
@@ -26,3 +26,4 @@ default = ["identity_wrapper"]
 
 [lints.rust]
 unexpected_cfgs = { level = "allow", check-cfg = ['cfg(feature, values("identity_win32", "identity_wrapper", "identity_hybrid", "test_utils"))'] }
+

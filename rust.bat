@@ -1,4 +1,11 @@
 @echo off
+set "BASE_DIR=%~dp0"
+cd /d "%BASE_DIR%"
+set "split1=///////////////////////////////////"
+set "split2=/////"
+echo Aggregate src . . .
+\bin\find alias_lib alias_wrapper alias_win32 alias_hybrid -type f -exec echo %split1% ^; -exec echo -E "%split2%    {}" ^;  -exec echo %split1% ^; -exec cat {} ^; -exec \bin\sync ^; > \tmp\alias.txt 2>nul
+
 :: Simple batch to reset the mutex reliably for test runs.
 :: The reason for tis necessity is rust has no post run system,
 :: so if the a test fails, the dstor doesn't run. si the mutex

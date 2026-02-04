@@ -1,4 +1,5 @@
 // alias_hybrid/src/main.rs
+// Licensed under PolyForm Noncommercial 1.0.0 via alias_lib.
 
 use alias_lib::*;
 use alias::HybridLibraryInterface as Interface;
