@@ -2312,6 +2312,7 @@ mod integrity_tests {
         assert!(is_file_accessible(&path));
     }
 
+    #[serial]
     #[test]
     fn test_integrity_healthy_file() {
         let dir = tempdir().unwrap();

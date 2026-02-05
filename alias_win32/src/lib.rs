@@ -8,7 +8,7 @@ use windows_sys::Win32::System::Console::{
     GetConsoleAliasesLengthW, GetConsoleAliasesW, AddConsoleAliasW,
     GetConsoleAliasesLengthA // Still used for api_responsive check
 };
-use alias_lib::*;
+use alias_lib::{is_drive_responsive, parse_alias_line, parse_macro_file, perform_audit, render_diagnostics, say, shout, text, timeout_guard, update_disk_file, whisper, AccessResult, AliasIcon, AliasProvider, DiagnosticReport, ProviderType, PurgeReport, RegistryStatus, SetOptions, Verbosity, VerbosityLevel, ENV_ALIAS_FILE, ENV_ALIAS_OPTS, IO_RESPONSIVENESS_THRESHOLD};
 use std::os::windows::ffi::OsStrExt;
 use std::time::Duration;
 use winreg::RegKey;

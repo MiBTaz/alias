@@ -1,22 +1,30 @@
 @echo off
 set "BASE_DIR=%~dp0"
 cd /d "%BASE_DIR%"
-set "split1=///////////////////////////////////"
-set "split2=/////"
-echo Aggregate src . . .
-\bin\find alias_lib alias_wrapper alias_win32 alias_hybrid -type f -exec echo %split1% ^; -exec echo -E "%split2%    {}" ^;  -exec echo %split1% ^; -exec cat {} ^; -exec \bin\sync ^; > \tmp\alias.txt 2>nul
+@echo off
+setlocal
+:: Set the policy song and dance for the current process tree
+set "PSExecutionPolicyPreference=Bypass"
+set "REGBACK=%TEMP%\autorun_backup.xml"
+
+powershell -Command "Get-ChildItem alias_lib,alias_wrapper,alias_win32,alias_hybrid -Recurse -File | ForEach-Object { '///////////////////////////////////'; '///// ' + $_.FullName; '///////////////////////////////////'; Get-Content $_.FullName }" > \tmp\alias.txt
 
 :: Simple batch to reset the mutex reliably for test runs.
-:: The reason for tis necessity is rust has no post run system,
-:: so if the a test fails, the dstor doesn't run. si the mutex
-:: needs ro be reset reliably outside of thr build system.
+:: not only do the tests need a reset, so does auto run. since the tests can't reliably
+:: restore the entry, needs to be done pre and post. 
 echo Resetting semaphonre . . .
- reg add "HKCU\Software\AliasTool\Backup" /v ActiveCount /t REG_DWORD /d 0 /f >nul 2>&1
-:: Ensure the path exists so reg add doesn't complain, then zero the count
-echo ensuring base registery entry exists . . .
-reg add "HKCU\Software\AliasTool\Backup" /v ActiveCount /t REG_DWORD /d 0 /f >nul 2>&1
+powershell -Command "$p='HKCU:\Software\Microsoft\Command Processor'; if(!(Test-Path '%REGBACK%')){Get-Item $p | Export-Clixml '%REGBACK%'}; $s='HKCU:\Software\AliasTool\Backup'; if(Test-Path $s){Remove-Item $s -Recurse -Force}; New-Item $s -Force; New-ItemProperty $s -Name 'ActiveCount' -Value 0 -PropertyType DWord"
+
 echo Running cargo check . . .
 cargo check
+echo [RUNNER] Starting Cargo %*...
 cargo %*
+set "EXIT_VAL=%errorlevel%"
+
+:: reg restore
+if exist "%REGBACK%" (
+    powershell -Command "$saved=Import-Clixml '%REGBACK%'; Set-ItemProperty 'HKCU:\Software\Microsoft\Command Processor' -Name 'AutoRun' -Value $saved.Property.AutoRun -Force; Remove-Item '%REGBACK%'"
+)
 
 
+exit /b %EXIT_VAL%

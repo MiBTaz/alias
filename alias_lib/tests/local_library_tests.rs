@@ -3,7 +3,6 @@
 use std::path::PathBuf;
 use std::time::Duration;
 use std::io;
-use alias_lib::*;
 use alias_lib::ShowFeature::{Off, On};
 use std::{env, fs};
 use serial_test::serial;
@@ -78,6 +77,7 @@ fn init() {
 // =========================================================
 #[cfg(test)]
 mod argument_tests {
+    use alias_lib::{dispatch, parse_arguments, AliasAction, SetOptions, ShowFeature, Task, Verbosity, VerbosityLevel};
     use super::*;
     //    use std::path::PathBuf;
 
@@ -450,6 +450,7 @@ mod existence_checks {
     use super::*;
     #[cfg(test)]
     mod path_logic_tests {
+        use alias_lib::{can_path_exist, is_drive_responsive, is_file_accessible, is_path_healthy, resolve_viable_path, timeout_guard};
         use super::*;
         // --- timeout_guard tests ---
         #[test]
@@ -524,6 +525,7 @@ mod existence_checks {
 }
 #[cfg(test)]
 mod parse_and_action {
+    use alias_lib::{parse_arguments, AliasAction, SetOptions};
     use crate::*;
 
     fn to_args(args: Vec<&str>) -> Vec<String> {
@@ -682,6 +684,7 @@ mod parse_and_action {
     fn t25_double_dash() { if let AliasAction::Query(n) = parse_arguments(&to_args(vec!["alias", "--", "--quiet"])).0.pull().unwrap().action { assert_eq!(n, "--quiet"); } else { panic!(); } }
 }
 mod round_trip_tests {
+    use alias_lib::AliasAction;
     use super::*;
 
     #[test]
@@ -721,6 +724,7 @@ mod round_trip_tests {
 // SECTION 2: SOVEREIGN VOICE & UI MACROS (Tests 26-40)
 // =========================================================
 mod voice_and_ui {
+    use alias_lib::{failure, get_random_tip, random_tip_show, say, shout, voice, AliasIcon, ErrorCode, ShowTips, Verbosity, VerbosityLevel, ICON_MATRIX};
     use super::*;
 
     #[test]
@@ -781,6 +785,7 @@ mod voice_and_ui {
 // SECTION 3: INTERNAL DATA & AUDIT LOGIC (Tests 41-60)
 // =========================================================
 mod data_and_audit {
+    use alias_lib::{calculate_new_file_state, get_alias_path, is_path_healthy, is_valid_name, mesh_logic, parse_arguments, parse_macro_file, voice, AliasAction, AliasEntryMesh, ENV_ALIAS_FILE};
     use super::*;
 
     #[test]
@@ -874,6 +879,7 @@ mod dispatch_and_integration {
     // SECTION 4: DISPATCH & INTEGRATION (THE FINAL 15)
     // =========================================================
 
+    use alias_lib::{dispatch, failure, get_alias_path, parse_arguments, AliasAction, ErrorCode, HelpMode, SetOptions, Task, Verbosity, DEFAULT_ALIAS_FILENAME, ENV_ALIAS_FILE};
     use super::*;
 
     #[test]
@@ -1042,6 +1048,7 @@ mod dispatch_and_integration {
 }
 #[cfg(test)]
 mod parse_set_args {
+    use alias_lib::{parse_set_argument, AliasAction, Verbosity, RESERVED_NAMES};
     use super::*;
 
     // Mock verbosity for testing

@@ -2,69 +2,23 @@
 // License: PolyForm Noncommercial 1.0.0 (Personal & Research Use Only)
 // Commercial use is strictly prohibited without a separate agreement.
 // Redistribution is permitted provided this notice and license remain intact.
-
-#[path = "../../versioning.rs"]
-pub mod versioning;
-pub use versioning::Versioning;
-
-// 1. THE ONLY GLOBAL INCLUDE
-// Points to the file created by alias_lib/build.rs in the same folder
-include!("generated_overall.rs");
-
-// 2. THE LOCAL BUILD INCLUDE (Churn/Hash for alias_lib only)
-include!(concat!(env!("OUT_DIR"), "/version_data.rs"));
-impl Versioning {
-    pub fn current() -> &'static Self {
-        &VERSION
-    }
-}
-impl Versioning {
-    pub fn display_versions(verbosity: &Verbosity, full_version: &'static Self, versions: &[&'static Self]) {
-        Self::display_short_version(verbosity, true, full_version, versions);
-        let separator = "-".repeat(65);
-        scream!(verbosity, AliasIcon::None, "{}", &separator);
-        scream!(verbosity, AliasIcon::None, "{:<16} | {:<10} | {:<8} | {:<15}", "Component", "Version", "Build", "Timestamp");
-        scream!(verbosity, AliasIcon::None, "{}", &separator);
-
-        for v in versions {
-            let version_str = format!("v{}.{}.{}", v.major, v.minor, v.patch);
-
-            scream!(verbosity, AliasIcon::None,
-                "{:<16} | {:<10} | {:<8} | {:<15}",
-                v.lib,
-                version_str,
-                v.compile,
-                v.timestamp
-            );
-        }
-        scream!(verbosity, AliasIcon::None, "{}", separator);
-    }
-    pub fn display_short_version(verbosity: &Verbosity, stderr: bool,  full_version: &'static Self, versions: &[&'static Self]) {
-        if versions.is_empty() { return; }
-
-        let exe_name = get_alias_exe_nofail(verbosity);
-        let core = versions[0];
-        let host = versions[versions.len() - 1];
-        let version = format!("{} v{}.{}.{} ({} {}.{}.{}/{}.{}.{} build {})",
-                              exe_name, full_version.major, full_version.minor, full_version.patch,
-                              host.lib,
-                              host.major, host.minor, host.patch,
-                              core.major, core.minor, core.patch,
-                              host.compile);
-
-
-        // alias_lib v0.5.2 (alias v0.0.4 build 339)
-        if stderr == false {
-            shout!(verbosity, AliasIcon::Question, "{}", version);
-        } else {
-            scream!(verbosity, AliasIcon::Question, "{}", version);
-        }
-    }
-}
+//
+use std::{env, fmt, fs, io};
+use std::collections::HashMap;
+use std::fs::File;
+use std::io::{Read, Seek, SeekFrom, Write};
+use std::ops::Not;
+use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::str::FromStr;
+use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use function_name::named;
 
 // --- Macros ---
-#[macro_export]
 #[cfg(debug_assertions)]
+#[macro_export]
 macro_rules! trace {
     // Branch 1: Single argument
     ($arg:expr) => {
@@ -121,8 +75,9 @@ macro_rules! voice {
     }};
 }
 
-#[macro_export]
+//#[macro_export]
 #[doc(hidden)]
+#[macro_export]
 macro_rules! to_bool {
     // These match specific expressions before falling back to the generic .is_on()
     (On) => { true };
@@ -136,6 +91,7 @@ macro_rules! to_bool {
     ($val:expr) => { $val.is_on() };
 }
 
+#[macro_export]
 macro_rules! impl_voice_macro {
     ($macro_name:ident, $method:ident, $default_icon:ident, $d:tt) => {
         #[macro_export]
@@ -193,6 +149,7 @@ macro_rules! failure {
     };
 }
 
+#[macro_export]
 macro_rules! setup_failure {
     ($voice:ident, $queue:ident, $arg:expr) => {
         scream!($voice, AliasIcon::Alert, "Invalid in setup mode: {}", $arg);
@@ -222,8 +179,71 @@ macro_rules! dispatch_failure {
 
         // Return the error. We use ErrorCode::Generic because we can't
         // cast a complex Enum to a u8, but we want the 'failure!' formatting.
-        return Err($crate::failure!($verbosity, $crate::ErrorCode::Generic, "{}", error_msg));
+        return Err(failure!($verbosity, $crate::ErrorCode::Generic, "{}", error_msg));
     }};
+}
+// Points to the file created by alias_lib/build.rs in the same folder
+include!("generated_overall.rs");
+
+// 2. THE LOCAL BUILD INCLUDE (Churn/Hash for alias_lib only)
+include!(concat!(env!("OUT_DIR"), "/version_data.rs"));
+#[path = "../../versioning.rs"]
+pub mod versioning;
+pub use versioning::Versioning;
+
+impl Versioning {
+    pub fn current() -> &'static Self {
+        &VERSION
+    }
+}
+impl Versioning {
+    pub fn display_versions(verbosity: &Verbosity, full_version: &'static Self, versions: &[&'static Self]) {
+        Self::display_short_version(verbosity, true, full_version, versions);
+        let separator = "-".repeat(65);
+        scream!(verbosity, AliasIcon::None, "{}", &separator);
+        scream!(verbosity, AliasIcon::None, "{:<16} | {:<10} | {:<8} | {:<15}", "Component", "Version", "Build", "Timestamp");
+        scream!(verbosity, AliasIcon::None, "{}", &separator);
+
+        for v in versions {
+            let version_str = format!("v{}.{}.{}", v.major, v.minor, v.patch);
+
+            scream!(verbosity, AliasIcon::None,
+                "{:<16} | {:<10} | {:<8} | {:<15}",
+                v.lib,
+                version_str,
+                v.compile,
+                v.timestamp
+            );
+        }
+        scream!(verbosity, AliasIcon::None, "{}", separator);
+    }
+    pub fn display_short_version(verbosity: &Verbosity, stderr: bool,  full_version: &'static Self, versions: &[&'static Self]) {
+        if versions.is_empty() { return; }
+
+        let exe_name = get_alias_exe_nofail(verbosity);
+        let core = versions[0];
+        let host = versions[versions.len() - 1];
+        let version = format!("{} v{}.{}.{} ({} {}.{}.{}/{}.{}.{} build {})",
+                              exe_name, full_version.major, full_version.minor, full_version.patch,
+                              host.lib,
+                              host.major, host.minor, host.patch,
+                              core.major, core.minor, core.patch,
+                              host.compile);
+
+
+        // alias_lib v0.5.2 (alias v0.0.4 build 339)
+        if stderr == false {
+            shout!(verbosity, AliasIcon::Question, "{}", version);
+        } else {
+            scream!(verbosity, AliasIcon::Question, "{}", version);
+        }
+    }
+}
+impl fmt::Display for Verbosity {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "Verbosity({:?}, Icons:{:?}, Tips:{:?})",
+               self.level, self.show_icons, self.show_tips)
+    }
 }
 
 // --- Shared Constants ---
@@ -511,7 +531,7 @@ impl Verbosity {
             level: VerbosityLevel::Loud,
             show_icons: ShowFeature::On,
             show_tips: ShowTips::On, // Always show tips in Loud mode
-            display_tip: random_tip_show(),
+            display_tip: Some(get_random_tip()),
             in_startup: false,
             in_setup: false,
             writer: None,
@@ -676,8 +696,9 @@ impl std::fmt::Debug for Verbosity {
             .field("level", &self.level)
             .field("show_icons", &self.show_icons)
             .field("show_tips", &self.show_tips)
+            .field("display_tip", &self.display_tip)
             .field("in_startup", &self.in_startup)
-            .field("writer", &"Option<Arc<Mutex<dyn Write>>>") // Just print a string label
+            .field("has_writer", &self.writer.is_some()) // Honest check
             .finish()
     }
 }
@@ -1300,7 +1321,7 @@ pub trait AliasProvider {
 // Phase A: Calls parse_arguments to build the TaskQueue.
 // Phase B (The Executor Loop): Iterates over every Task in the queue and passes it to dispatch.
 // Special Case: Handles --setup separately before the loop
-
+#[named]
 pub fn run<P: AliasProvider>(mut args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
     // 1. ENV Injection (unchanged)
     if let Ok(opts) = env::var(ENV_ALIAS_OPTS) {
@@ -1404,10 +1425,13 @@ pub fn run<P: AliasProvider>(mut args: Vec<String>) -> Result<(), Box<dyn std::e
     }
 
     if let Some(tip_text) = verbosity.display_tip {
+        #[cfg(debug_assertions)]
+        trace!("Tip: {}", tip_text);
         say!(verbosity, AliasIcon::None, "\n");
         say!(verbosity, AliasIcon::Info, tip_text);
     }
-
+    #[cfg(debug_assertions)]
+    trace!("Verbosity {:?}", verbosity);
     Ok(())
 }
 // --- Argument --- Processing
@@ -1426,7 +1450,7 @@ macro_rules! parse_continue {
 }#[cfg_attr(debug_assertions, named)]
 pub fn parse_arguments(args: &[String]) -> (TaskQueue, Verbosity) {
     let mut queue = TaskQueue::new();
-    let mut voice = Verbosity::loud();
+    let mut voice = Verbosity::normal();
     let mut custom_path: PathBuf = PathBuf::from("");
     let mut volatile = false;
     let mut force_case = false;
@@ -1692,6 +1716,8 @@ pub fn parse_arguments(args: &[String]) -> (TaskQueue, Verbosity) {
     if queue.is_empty() && !saw_unknown {
         queue.push(AliasAction::ShowAll);
     }
+    #[cfg(debug_assertions)]
+    trace!("voice.{:?}", voice);
     (queue, voice)
 }
 #[cfg_attr(debug_assertions, named)]
@@ -2037,7 +2063,7 @@ SYSTEM & BOOT:
   For multi quoted aliases, cmd has a tendancy to be very britle. Using --edalias is usually better
   Don't want to ever fallback to doskey? Use alias_win32. Never want to hit the api? Use alias_wrapper.
 
-  "#, exe_name = exe_name, alias_file = ENV_ALIAS_FILE);
+  "#, exe_name = exe_name, alias_file = DEFAULT_ALIAS_FILENAME);
 
     // 3. Environment (Keep these separate to use the Constants)
     let eaf = std::env::var(ENV_ALIAS_FILE).unwrap_or_else(|_| "".to_string());
@@ -2049,7 +2075,6 @@ SYSTEM & BOOT:
     // 4. Footer Status
     if let Some(p) = path {
         if verbosity.level < VerbosityLevel::Normal {
-            shout!(verbosity, AliasIcon::File, "  CURRENT FILE: {:<7}  {}", "", p.display());
             shout!(verbosity, AliasIcon::File, "  CURRENT FILE: {:<7}  {}", "", p.display());
         } else {
             shout!(verbosity, AliasIcon::File, "  CURRENT FILE: {:<5}  {}", "", p.display());
@@ -2745,15 +2770,12 @@ pub fn peek_pe_metadata(path: &Path) -> io::Result<(BinarySubsystem, bool)> {
 
 pub fn random_num_bounded(limit: usize) -> usize {
     if limit == 0 { return 0 };
-
     // 1. Get the time (ms or ns)
     let now = SystemTime::now();
     let time_seed = now.duration_since(UNIX_EPOCH)
         .map(|d| d.as_nanos()) // Use nanos, even if "unreliable", it's more jitter than ms
         .unwrap_or(0);
-
     // 2. Use a static counter to guarantee change in tight loops
-    use std::sync::atomic::{AtomicUsize, Ordering};
     static COUNTER: AtomicUsize = AtomicUsize::new(0);
     let count = COUNTER.fetch_add(1, Ordering::Relaxed);
 
@@ -2764,8 +2786,13 @@ pub fn random_num_bounded(limit: usize) -> usize {
 
     // Mix them using XOR and bit-shifting to ensure high/low bits all dance
     let final_seed = time_seed ^ (thread_seed << 32) ^ (count as u128);
+    diffuse_entropy(final_seed, limit)
+}
 
-    (final_seed % limit as u128) as usize
+pub fn diffuse_entropy(seed: u128, limit: usize) -> usize {
+    let mut x = seed.wrapping_add(0x9E3779B97F4A7C15);
+    x = (x ^ (x >> 30)).wrapping_mul(0xBF58476D1CE4E5B9);
+    ((x ^ (x >> 27)) as usize) % limit
 }
 
 pub fn get_random_tip() -> &'static str {
@@ -2774,7 +2801,23 @@ pub fn get_random_tip() -> &'static str {
     TIPS_ARRAY[random_seed]
 }
 
+#[named]
 pub fn random_tip_show() -> Option<&'static str> {
+    let roll = random_num_bounded(usize::MAX);
+
+    // Calculate 10% of the total possible u128 space
+    let threshold = usize::MAX / 10;
+
+    // If the roll falls anywhere in the first 10% of the possible values
+    if roll < threshold {
+        #[cfg(debug_assertions)]
+        trace!("Ping {} < {}", roll, threshold);
+        return Some(get_random_tip());
+    }
+    None
+}
+
+pub fn non_entropic_random_tip_show() -> Option<&'static str> {
     let seed = random_num_bounded(usize::MAX);
     if seed % 10 == 0 {
         return Some(get_random_tip());
