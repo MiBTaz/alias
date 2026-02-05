@@ -19,7 +19,7 @@ jobs:
       with:
         fetch-depth: 0
     - name: Build
-      run: cargo build --verbose --workspace
+      run: cargo build --verbose --workspace  
     - name: Run tests
-      run: cargo test --verbose --workspace
+      run: cargo test --verbose --workspace -- --test-threads=1
 
