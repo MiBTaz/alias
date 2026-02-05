@@ -2446,9 +2446,11 @@ pub fn get_alias_path(current_file: &str) -> Option<PathBuf> {
 //            }
 //            is_viable_path(p)
             let parent = p.parent().unwrap();
-            // If folder exists, we're good. If not, check if we CAN create it.
             if parent.exists() { return is_viable_path(p); }
+            // Check Grandpa; if he's home, build the Parent and re-verify the file path
             parent.parent().map_or(false, |gp| gp.exists())
+                && std::fs::create_dir_all(parent).is_ok()
+                && is_viable_path(p)
         })
 }
 
