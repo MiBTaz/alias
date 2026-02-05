@@ -27,6 +27,12 @@ pub fn global_test_setup() {
         std::env::remove_var("ALIAS_OPTS");
         std::env::remove_var("ALIAS_PATH");
     }
+    let tmp = std::env::temp_dir().join("alias_ci");
+    let _ = std::fs::create_dir_all(&tmp);
+    unsafe {
+        std::env::set_var("ALIAS_PATH", tmp.to_str().unwrap());
+        std::env::set_var("ALIAS_FILE", "test.doskey");
+    }
 }
 
 // 3. SHARED MOCK PROVIDER
@@ -138,7 +144,4 @@ impl AliasProvider for MockProvider {
         &MOCK_VER
     }
 }
-
-
-
 

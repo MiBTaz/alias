@@ -1669,6 +1669,7 @@ mod battery_15 {
 
     #[test]
     fn test_run_hydration_logic() {
+        global_test_setup();
         // Test 1: Startup only
         let args = vec!["alias.exe".into(), "--startup".into()];
         let result = run::<MockProvider>(args);
