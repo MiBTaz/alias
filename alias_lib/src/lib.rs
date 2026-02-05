@@ -216,8 +216,8 @@ impl Versioning {
                 v.timestamp
             );
         }
-        scream!(verbosity, AliasIcon::None, "{}", separator);
-        scream!(verbosity, AliasIcon::Scales, "\n{}", LICENSE);
+        scream!(verbosity, AliasIcon::None, "{}\n", separator);
+        scream!(verbosity, AliasIcon::Scales, "{}", LICENSE);
     }
     pub fn display_short_version(verbosity: &Verbosity, stderr: bool,  full_version: &'static Self, versions: &[&'static Self]) {
         if versions.is_empty() { return; }
@@ -2111,11 +2111,11 @@ SYSTEM & BOOT:
 }
 
 fn print_license(verbosity: &Verbosity) {
-    shout!(verbosity, AliasIcon::Scales, "License: PolyForm Noncommercial 1.0.0");
-    shout!(verbosity, AliasIcon::Info, "Terms: No commercial use permitted.");
+    shout!(verbosity, AliasIcon::Scales, "{}", LICENSE);
+    shout!(verbosity, AliasIcon::Info, "Terms: No commercial use permitted.\n");
 
     let license = include_str!("../../LICENSE.md");
-    shout!(verbosity, AliasIcon::Scales, "\nLICENSE:\n{}\n", license);
+    shout!(verbosity, AliasIcon::Scales, "LICENSE:\n{}\n", license);
 //    let contribute = include_str!("../../CONTRIBUTING.md");
 //    shout!(verbosity, AliasIcon::Architect, "CONTRIBUTING\n{}\n", contribute);
 }
