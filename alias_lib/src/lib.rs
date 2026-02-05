@@ -2441,10 +2441,14 @@ pub fn get_alias_path(current_file: &str) -> Option<PathBuf> {
         .filter_map(|var| env::var(var).ok().map(PathBuf::from))
         .map(|base| base.join(DEFAULT_APPDATA_ALIAS_DIR).join(DEFAULT_ALIAS_FILENAME))
         .find(|p| {
-            if !p.parent().map_or(false, |parent| parent.exists()) {
-                return false;
-            }
-            is_viable_path(p)
+//            if !p.parent().map_or(false, |parent| parent.exists()) {
+//                return false;
+//            }
+//            is_viable_path(p)
+            let parent = p.parent().unwrap();
+            // If folder exists, we're good. If not, check if we CAN create it.
+            if parent.exists() { return is_viable_path(p); }
+            parent.parent().map_or(false, |gp| gp.exists())
         })
 }
 
