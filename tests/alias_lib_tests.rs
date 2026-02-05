@@ -1694,6 +1694,7 @@ mod battery_15 {
     }
 }
 
+
 #[cfg(test)]
 mod battery_16 {
     use serial_test::serial;
@@ -1740,8 +1741,8 @@ mod battery_16 {
             std::env::remove_var("ALIAS_OPTS");
         }
     }
-}
  */
+}
 
 #[cfg(test)]
 mod battery_17 {
@@ -1937,8 +1938,8 @@ mod battery_19 {
             "Queue should fall back to default system path when flag parsing fails"
         );
     }
-}
      */
+}
 
 #[cfg(test)]
 mod battery_20 {
@@ -2311,8 +2312,8 @@ mod intent_and_symmetry_tests {
         assert_eq!(r.name, "g");
         assert!(r.force_case); // This verifies the rename is functional
     }
+*/
 }
- */
 
 #[cfg(test)]
 mod integrity_tests {
@@ -2418,8 +2419,8 @@ mod integrity_tests {
         // If this is None in your audit, it means none of the standard paths have a viable parent
         assert!(res.is_some(), "Standard OS discovery should return a default path when ENV is empty");
     }
-}
  */
+}
 
 #[cfg(test)]
 mod tips_test {
