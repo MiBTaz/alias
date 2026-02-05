@@ -3,6 +3,7 @@
 name = "alias_win32"
 version = "0.3.4"
 edition = "2024"
+license-file = "../../LICENSE"
 
 [dependencies]
 # Pull the shared version/path from root

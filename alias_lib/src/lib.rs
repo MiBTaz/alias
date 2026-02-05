@@ -14,6 +14,7 @@ use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+#[allow(unused_imports)]
 use function_name::named;
 
 // --- Macros ---
@@ -216,6 +217,7 @@ impl Versioning {
             );
         }
         scream!(verbosity, AliasIcon::None, "{}", separator);
+        scream!(verbosity, AliasIcon::Scales, "\n{}", LICENSE);
     }
     pub fn display_short_version(verbosity: &Verbosity, stderr: bool,  full_version: &'static Self, versions: &[&'static Self]) {
         if versions.is_empty() { return; }
@@ -262,7 +264,6 @@ const ENV_EDITOR: &str = "EDITOR";
 const ENV_VISUAL: &str = "VISUAL";
 const ENV_PATHEXT: &str = "PATHEXT";
 const ENV_PATH: &str = "PATH";
-
 pub const DEFAULT_ALIAS_FILENAME: &str = "aliases.doskey";
 const DEFAULT_APPDATA_ALIAS_DIR: &str = "alias_tool";
 const FALLBACK_EDITOR: &str = "notepad";
@@ -278,6 +279,7 @@ pub const RESERVED_NAMES: &[&str] = &[
 ];
 pub const MAX_ALIAS_FILE_SIZE: usize = 1_500_000;
 pub const MAX_BINARY_FILE_SIZE: usize = 100_000_000;
+pub const LICENSE: &str = "License: PolyForm Noncommercial 1.0.0";
 
 // --- Structs ---
 #[derive(Debug)]
@@ -434,10 +436,11 @@ pub enum PathIntegrity {
 #[derive(Debug, Clone, Copy)]
 #[repr(usize)]
 pub enum AliasIcon {
-    None    = 0,  Win32 = 1,  Doskey = 2,  Disk        = 3,  Alert    = 4,
-    Success = 5,  Info  = 6,  Say    = 7,  Whisper     = 8,  Shout    = 9,
-    Scream  = 10, Fail  = 11, Hint   = 12, Environment = 13, Ok       = 14,
-    Tools   = 15, File  = 16, Path   = 17, Text        = 18, Question = 19,
+    None    = 0,  Win32     = 1,  Doskey = 2,  Disk        = 3,  Alert     = 4,
+    Success = 5,  Info      = 6,  Say    = 7,  Whisper     = 8,  Shout     = 9,
+    Scream  = 10, Fail      = 11, Hint   = 12, Environment = 13, Ok        = 14,
+    Tools   = 15, File      = 16, Path   = 17, Text        = 18, Question  = 19,
+    Scales  = 20, Architect = 21,
     _VariantCount,
 }
 
@@ -817,6 +820,7 @@ pub enum AliasAction {
     Icons,
     NoIcons,
     Invalid,
+    License,
     Reload,
     Set(SetOptions),
     Setup,
@@ -844,6 +848,7 @@ impl AliasAction {
             AliasAction::Edit(Some(editor)) => format!("--edalias=\"{}\"", editor),
             AliasAction::File              => "--file".to_string(),
             AliasAction::Help              => "--help".to_string(),
+            AliasAction::License           => "--license".to_string(),
             AliasAction::Reload            => "--reload".to_string(),
             AliasAction::Setup             => "--setup".to_string(),
             AliasAction::ShowAll           => "--show-all".to_string(),
@@ -988,6 +993,7 @@ impl FromStr for AliasAction {
                 }
             },
             "--help"                    => Ok(if is_negated { Self::Invalid } else { Self::Help }),
+            "--license"                 => Ok(if is_negated { Self::Invalid } else { Self::License }),
             "--reload"                  => Ok(if is_negated { Self::Invalid } else { Self::Reload }),
             "--setup"                   => Ok(if is_negated { Self::Invalid } else { Self::Setup }),
             "--startup"                 => Ok(if is_negated { Self::Invalid } else { Self::Startup }),
@@ -1016,6 +1022,7 @@ impl fmt::Display for AliasAction {
             Self::Help                  => write!(f, "--help"),
             Self::Icons                 => write!(f, "--icons"),
             Self::NoIcons               => write!(f, "--no-icons"),
+            Self::License               => write!(f, "--license"),
             Self::Query(q)      => write!(f, "{}", q),
             Self::Quiet                 => write!(f, "--quiet"),
             Self::NoQuiet               => write!(f, "--no-quiet"),
@@ -1067,6 +1074,7 @@ impl<'a> std::fmt::Display for AliasErrorString<'a> {
             AliasAction::Invalid => write!(f, "Unrecognized or malformed command"),
             AliasAction::Icons => write!(f, "Error setting icons"),
             AliasAction::NoIcons => write!(f, "Error unsetting icons"),
+            AliasAction::License => write! (f, "Error displaying license"),
             AliasAction::Query(name) => write!(f, "Error querying alias {}: ", name),
             AliasAction::Reload => write!(f, "Error reloading configuration"),
             AliasAction::Remove(opts) => write!(f, "Error removing alias: {}", opts.name),
@@ -1113,6 +1121,9 @@ pub static ICON_MATRIX: [[&str; 2]; ICON_TYPES] = [
     ["P",  "🛣️"], // Path
     ["T",  "️💬"], // Text
     ["?",  "🤔"], // Question
+    ["&",  "⚖️"], // scales
+    ["=",  "🏗️"], // Architect
+
 ];
 
 pub const TIPS_ARRAY: &[&str] = &[
@@ -1321,7 +1332,7 @@ pub trait AliasProvider {
 // Phase A: Calls parse_arguments to build the TaskQueue.
 // Phase B (The Executor Loop): Iterates over every Task in the queue and passes it to dispatch.
 // Special Case: Handles --setup separately before the loop
-#[named]
+#[cfg_attr(debug_assertions, named)]
 pub fn run<P: AliasProvider>(mut args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
     // 1. ENV Injection (unchanged)
     if let Ok(opts) = env::var(ENV_ALIAS_OPTS) {
@@ -1447,7 +1458,8 @@ macro_rules! parse_continue {
         $pivot = $i + $offset;
         continue;
     };
-}#[cfg_attr(debug_assertions, named)]
+}
+#[cfg_attr(debug_assertions, named)]
 pub fn parse_arguments(args: &[String]) -> (TaskQueue, Verbosity) {
     let mut queue = TaskQueue::new();
     let mut voice = Verbosity::normal();
@@ -1476,6 +1488,11 @@ pub fn parse_arguments(args: &[String]) -> (TaskQueue, Verbosity) {
             AliasAction::Help => {
                 queue.clear();
                 queue.push_file(AliasAction::Help, get_alias_path("").unwrap());
+                return (queue, voice);
+            }
+            AliasAction::License => {
+                queue.clear();
+                queue.push(AliasAction::License);
                 return (queue, voice);
             }
             AliasAction::Version=> {
@@ -1834,6 +1851,7 @@ pub fn dispatch<P: AliasProvider>(task: Task, verbosity: &Verbosity, ) -> Result
             P::reload_full(verbosity, path, false)?;
         }
         AliasAction::Help => print_help(verbosity, HelpMode::Full, Some(path)),
+        AliasAction::License => print_license(verbosity),
         AliasAction::Query(term) => {
             for line in P::query_alias(&term, verbosity) {
                 verbosity.whisper(&line);
@@ -1991,7 +2009,8 @@ pub fn open_editor(path: &Path, override_ed: Option<String>, verbosity: &Verbosi
 fn print_help(verbosity: &Verbosity, mode: HelpMode, path: Option<&Path>) {
     let exe_name = get_alias_exe_nofail(verbosity);
     shout!(verbosity, AliasIcon::Info, "ALIAS ({}) - High-speed alias management", exe_name);
-    say!(verbosity, AliasIcon::None, r#"
+    shout!(verbosity, AliasIcon::Scales, "{}", LICENSE);
+    shout!(verbosity, AliasIcon::None, r#"
 USAGE:
   alias                       List active macros
   alias <name>                Search for a specific macro
@@ -2004,6 +2023,8 @@ USAGE:
     shout!(verbosity, AliasIcon::None, r#"
 FLAGS:
 --help                  Show this help menu
+--license               Show Licensing information
+--version, --ver        Show versioning information
 
 ENVIRONMENT VARIABLES:
 ALIAS_FILE              Default alias file name ({alias_file})
@@ -2089,6 +2110,15 @@ SYSTEM & BOOT:
     }
 }
 
+fn print_license(verbosity: &Verbosity) {
+    shout!(verbosity, AliasIcon::Scales, "License: PolyForm Noncommercial 1.0.0");
+    shout!(verbosity, AliasIcon::Info, "Terms: No commercial use permitted.");
+
+    let license = include_str!("../../LICENSE.md");
+    shout!(verbosity, AliasIcon::Scales, "\nLICENSE:\n{}\n", license);
+//    let contribute = include_str!("../../CONTRIBUTING.md");
+//    shout!(verbosity, AliasIcon::Architect, "CONTRIBUTING\n{}\n", contribute);
+}
 //////////////////////////////////////////////////////
 ////
 //// --- Reporting and Diagnostics ---
@@ -2801,7 +2831,7 @@ pub fn get_random_tip() -> &'static str {
     TIPS_ARRAY[random_seed]
 }
 
-#[named]
+#[cfg_attr(debug_assertions, named)]
 pub fn random_tip_show() -> Option<&'static str> {
     let roll = random_num_bounded(usize::MAX);
 

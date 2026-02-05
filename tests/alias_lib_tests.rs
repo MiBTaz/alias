@@ -465,7 +465,6 @@ mod icon_system_tests {
         // Verify specifically that Success (5) points to the "✨" icon in Unicode mode
         assert_eq!(ICON_MATRIX[AliasIcon::Success as usize][1], "✨");
 
-        // Verify that Fail (11) points to "X" in ASCII mode
         assert_eq!(ICON_MATRIX[AliasIcon::Fail as usize][0], "X");
     }
 
@@ -473,7 +472,7 @@ mod icon_system_tests {
     fn test_variant_count_logic() {
         // Ensure _VariantCount is actually at the end
         // If this isn't the last element, ICON_TYPES will be wrong
-        let last_valid_icon = AliasIcon::Question as usize;
+        let last_valid_icon = AliasIcon::Architect as usize;
         assert_eq!(last_valid_icon + 1, ICON_TYPES);
     }
 }

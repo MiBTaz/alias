@@ -89,12 +89,14 @@ The system uses **Reference-Based Verbosity** to avoid unnecessary memory clones
 
 ### System & Boot
 
-|**Flag**|**Description**|
-|---|---|
-|`--setup`|Initialize Windows Registry AutoRun hooks.|
-|`--startup`|Execute boot-time hydration (called via AutoRun).|
-|`--clear`|Nuke all aliases in the active context.|
-|`--version` / `--ver`|Show full build metadata vs. short version string.|
+| **Flag**              | **Description**                                    |
+|-----------------------|----------------------------------------------------|
+| `--setup`             | Initialize Windows Registry AutoRun hooks.         |
+| `--startup`           | Execute boot-time hydration (called via AutoRun).  |
+| `--clear`             | Nuke all aliases in the active context.            |
+| `--license`           | Show Licensing.                                    |
+| `--version` / `--ver` | Show full build metadata vs. short version string. |
+
 
 ---
 

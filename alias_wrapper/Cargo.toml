@@ -3,6 +3,7 @@
 name = "alias_wrapper"
 version = "0.2.4"
 edition = "2024"
+license-file = "../../LICENSE"
 
 [dependencies]
 alias_lib = { workspace = true }
