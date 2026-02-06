@@ -92,6 +92,7 @@ fn test_routine_purge_ram() {
 #[test]
 #[serial]
 fn test_win32_rapid_fire_sync() {
+    std::thread::sleep(std::time::Duration::from_millis(100));
     let path = get_test_path("stress");
     for i in 0..20 {
         let name = format!("stress_test_{}", i);

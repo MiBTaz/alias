@@ -57,7 +57,11 @@ fn test_wrapper_passthrough_logic() {
     // This uses the 'assert' method from assert_cmd::prelude
     cmd.assert().success();
 }
+
 /*
+// This test is a failed attempt to reconcile trailing quotes and
+// doskey output. opted for keeping win32 api clean and reliable over
+// breaking it for a fallback.
 #[test]
 #[named]
 fn test_wrapper_preserves_internal_trailing_quotes() {

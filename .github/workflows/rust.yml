@@ -1,25 +1,41 @@
-name: Rust Workspace Build
+name: Rust Workspace Build (Test or NextTest)
 
 on:
   push:
     branches: [ "main" ]
-  pull_request:
-    branches: [ "main" ]
+  workflow_dispatch:
+    inputs:
+      runner:
+        description: 'Choose Test Runner'
+        required: true
+        default: 'nextest'
+        type: choice
+        options:
+          - nextest
+          - standard
 
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
   build:
-
     runs-on: windows-latest
-
     steps:
     - uses: actions/checkout@v4
       with:
         fetch-depth: 0
     - name: Build
       run: cargo build --verbose --workspace
-    - name: Run tests
-      run: cargo test --verbose --workspace -- --test-threads=1
 
+    - name: Install Nextest
+      uses: taiki-e/install-action@nextest
+
+    - name: Run Selected Tests
+      shell: pwsh
+      run: |
+        if ("${{ github.event.inputs.runner }}" -eq "standard") {
+          cargo test --verbose --workspace -- --test-threads=1
+        } else {
+          cargo nextest run --workspace --retries 2 --test-threads 1
+        }
+        

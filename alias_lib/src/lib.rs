@@ -2415,11 +2415,16 @@ pub fn is_valid_name_loose(name: &str) -> bool {
     first.is_alphabetic() || first.is_ascii_digit() || first == '_'
 }
 
+#[cfg_attr(debug_assertions, named)]
 pub fn get_alias_path(current_file: &str) -> Option<PathBuf> {
     // 1. Priority One: Explicit override (passed from CLI)
     if !current_file.is_empty() {
+        #[cfg(debug_assertions)]
+        trace!("current_file: {}", current_file);
         let target = PathBuf::from(current_file);
         if is_viable_path(&target) {
+            #[cfg(debug_assertions)]
+            trace!("{} is viable", target.to_str().unwrap());
             return Some(target);
         }
         // If the explicit file isn't viable, we might want to fail hard,
@@ -2428,10 +2433,15 @@ pub fn get_alias_path(current_file: &str) -> Option<PathBuf> {
 
     // 2. Priority Two: Environment Variable
     if let Ok(val) = env::var(ENV_ALIAS_FILE) {
+        #[cfg(debug_assertions)]
+        trace!("ALIAS_FILE: {}", val);
         let p = PathBuf::from(val);
         let target = if p.is_dir() { p.join(DEFAULT_ALIAS_FILENAME) } else { p };
-
+        #[cfg(debug_assertions)]
+        trace!("target: {}", target.to_str().unwrap());
         if is_viable_path(&target) {
+            #[cfg(debug_assertions)]
+            trace!("{} is viable", target.to_str().unwrap());
             return Some(target);
         }
     }
@@ -2445,8 +2455,16 @@ pub fn get_alias_path(current_file: &str) -> Option<PathBuf> {
 //                return false;
 //            }
 //            is_viable_path(p)
+            #[cfg(debug_assertions)]
+            trace!("checking {}", p.display());
             let parent = p.parent().unwrap();
-            if parent.exists() { return is_viable_path(p); }
+            #[cfg(debug_assertions)]
+            trace!("parent {}", parent.to_str().unwrap());
+            if parent.exists() {
+                #[cfg(debug_assertions)]
+                trace!("parent exists");
+                return is_viable_path(p);
+            }
             // Check Grandpa; if he's home, build the Parent and re-verify the file path
             parent.parent().map_or(false, |gp| gp.exists())
                 && std::fs::create_dir_all(parent).is_ok()

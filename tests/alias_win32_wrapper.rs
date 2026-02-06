@@ -297,6 +297,7 @@ pub mod testing {
 #[test]
 #[serial]
 fn test_routine_set_and_query() {
+    std::thread::sleep(std::time::Duration::from_millis(200));
     let name = "gauntlet_test";
     let val = "echo gauntlet";
     let path = get_test_path("gauntlet");
@@ -405,6 +406,7 @@ fn test_routine_delete_sync() {
 #[test]
 #[serial]
 fn test_thread_silo_isolation() {
+    std::thread::sleep(std::time::Duration::from_millis(100));
     let pid = std::process::id();
     let name_a = format!("silo_a_{}", pid);
     let name_b = format!("silo_b_{}", pid);
@@ -414,7 +416,12 @@ fn test_thread_silo_isolation() {
     // 2. Set B
     P::raw_set_macro(&name_b, Some("val_b")).unwrap();
 
-    std::thread::sleep(std::time::Duration::from_millis(50));
+    let mut all = Vec::new();
+    for _ in 0..10 {
+        all = P::get_all_aliases(&voice!(Silent, Off, Off)).expect("Failed to read RAM macros");
+        if all.iter().any(|(n, _)| n == &name_a) && all.iter().any(|(n, _)| n == &name_b) { break; }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
 
     let all = P::get_all_aliases(&voice!(Silent, Off, Off)).expect("Failed to read RAM macros");
 
